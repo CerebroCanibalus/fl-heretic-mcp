@@ -285,6 +285,54 @@ Crate futuro (no en Fase 0+1):
 - Tools transport: `fl_ping`, `fl_get_tempo`, `fl_set_tempo`, `fl_play`, `fl_stop`, etc.
 - Nuevo crate `heretic-mcp` con FlojoMCP stdio
 
+### 2026-09-25 (tarde) — HALLAZGO MAYOR: el setup usa `fLMCP Bridge`, NO FLStudioMCP legacy
+
+**El setup del usuario es COMPLETAMENTE diferente** al que asumimos en la auditoría:
+
+1. **NO hay FLStudioMCP legacy instalado.** El controller script activo está en:
+   - `%USERPROFILE%\Documents\Image-Line\FL Studio\Settings\Hardware\fLMCP Bridge\device_FLStudioMCP.py` (72KB, 2049 líneas)
+   - **Bridge v0.2.0**, FL version 38, MIDI scripting v38
+
+2. **`fLMCP Bridge`** (https://github.com/your-handle/fLMCP) es un sistema paralelo:
+   - **TCP** `127.0.0.1:9876` con framing `[BE u32 len][body]` JSON-RPC
+   - **File-RPC** fallback: `$SCRIPT_DIR\rpc_request.json` → `rpc_response.json`
+   - 133 actions agrupadas en: meta, transport, patterns, channels, mixer, plugins, playlist, arrangement, automation, project, ui, pianoroll
+   - **MUCHO más maduro que el FLStudioMCP legacy** (67 tools → 133 actions)
+
+3. **TCP falla en el sandbox de FL 2025**: `daemon threads disabled` + `start_new_thread returned NULL`. Pero **file-RPC SÍ funciona** porque OnIdle del controller script procesa archivos en main thread. Latencia ~200ms (verificado en `tests/test_flmcp_filerpc.py`).
+
+4. **Bug B9** (que arreglamos pensando que era del MIDI SysEx) sigue siendo relevante: el daemon NO debe reportar éxito sin verificar la conexión real.
+
+### Decisión arquitectónica revisada
+
+**OLVIDAR MIDI SysEx** — era el camino equivocado para tu setup. El bridge correcto es **file-RPC** (primario, simple, funciona confirmado) + **TCP** (secundario, mejor performance, requiere threading fuera del sandbox).
+
+### Mapeo de tools a actions
+
+| Nuestro tool | Action fLMCP Bridge |
+|---|---|
+| `fl_ping` | `meta.ping` |
+| `fl_get_tempo` | `transport.status` (extraer `bpm`) |
+| `fl_set_tempo` | `transport.set_tempo` |
+| `fl_play` | `transport.start` |
+| `fl_stop` | `transport.stop` |
+| `fl_get_play_state` | `transport.status` |
+| `fl_get_song_position` | `transport.status` |
+| `fl_set_song_position` | `transport.set_position` |
+
+### Decisión pendiente con el usuario
+
+- [ ] ¿Confirmar adaptar al protocolo `fLMCP Bridge` (file-RPC + TCP) en vez de MIDI SysEx?
+- [ ] ¿Conservar nombre `heretic-fl` o renombrar a `heretic-flmcp`?
+- [ ] ¿Empezar por file-RPC (simple, funciona YA) y dejar TCP para después?
+
+### Commits relevantes
+
+- `c64565d` — código Fase 2 con MIDI SysEx (IRRELEVANTE para este setup)
+- `5377d04` — fixes de compilación (siguen aplicando si reemplazamos)
+- `256b416` — fix B9 (wait_for_first_heartbeat)
+- `d6c3e63` — test file-RPC al fLMCP Bridge (FUNCIONA)
+
 ---
 
 ## 8. Bugs abiertos / descubrimientos críticos
@@ -307,7 +355,7 @@ Crate futuro (no en Fase 0+1):
 
 → **Conclusión**: MIDI SysEx es el único canal bidireccional always-on en el controller script. El `.pyscript` del piano roll tiene file I/O pero solo corre on-demand (UX horrible).
 
----
+**ACTUALIZACIÓN 2026-09-25**: el setup REAL del usuario usa `fLMCP Bridge` (NO FLStudioMCP legacy). MIDI SysEx NO aplica. El bridge correcto es file-RPC + TCP sobre JSON-RPC. Ver sección §7 changelog.
 
 ## 9. Próximos pasos inmediatos
 
