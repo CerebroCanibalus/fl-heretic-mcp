@@ -510,3 +510,81 @@ cargo run -p ping                        # cliente ping → daemon
 - **Probar antes de declarar terminado.** Tests con `FlojoTester`-style + smoke tests reales contra el daemon.
 - **Documentar descubrimientos** en §8 inmediatamente.
 - **Una decisión por pregunta.** No apilar decisiones en una sola.
+
+---
+
+## 14. HALLAZGOS DEL SANDBOX DE FL STUDIO 2025 (medidos, no supuesto)
+
+Todos estos datos vienen de `tests/probe_sandbox.py`, ejecutado DENTRO de FL Studio
+2025 (MIDI scripting v38, FL version 38) el 2026-09-25. Los resultados se leen en
+`.../FL Studio/Settings/Hardware/HereticProbe/probe_result.json`.
+
+### Lo que FUNCIONA
+
+| Capacidad | Veredicto |
+|---|---|
+| `open()` lectura/escritura de ficheros en el script dir | **OK** — `write+read = 'hola'` |
+| FL API completa (`channels`, `mixer`, `transport`, `playlist`, `arrangement`, `patterns`, `plugins`, `ui`, `general`, `midi`, `device`) | **OK** |
+| `exec()` de Python arbitrario (action `meta.exec`) | **OK** — da acceso a ~250 funciones |
+
+### Lo que está BLOQUEADO (todos con el mismo patrón "returned NULL without setting an exception")
+
+| Operación | Error exacto |
+|---|---|
+| Threads (daemon) | `RuntimeError: daemon threads are disabled in this (sub)interpreter` |
+| Threads (cualquiera) | `SystemError: <built-in function start_new_thread> returned NULL` |
+| `import ctypes` | **`ImportError: module _ctypes does not support loading in subinterpreters`** |
+| `socket.socket()` | `<slot wrapper '__init__' of '_socket.socket' objects> returned NULL` |
+| `open(r"\\.\pipe\...")` (cliente) | `<class '_io.FileIO'> returned NULL` |
+| `os.rename` | `<built-in function rename> returned NULL` |
+| `os.mkdir` | `<built-in function mkdir> returned NULL` |
+| `os.unlink` | falla en silencio (el fichero sigue ahí) |
+| `glob` / listado de directorio | `<built-in function audit> returned NULL` (falla en silencio, devuelve vacío) |
+| `__file__` | **no está definido** — `NameError`. Calcular el path desde `USERPROFILE` |
+| `os.mkfifo` | no existe (Windows) |
+
+### Consecuencias de diseño (duraderas)
+
+- **C1. Named Pipes son IMPOSIBLES.** Un pipe servidor exige `CreateNamedPipeW`
+  (Win32), y `ctypes` está bloqueado a nivel de sub-intérprete. Ni siquiera el rol
+  de cliente funciona vía `open()`. **No es una decisión de diseño nuestra: es
+  que no existe IPC por pipe desde el script de FL.** Investigado y cerrado.
+- **C2. TCP desde el script es IMPOSIBLE.** `socket` bloqueado. El puerto
+  9876 nunca se abre. El propio bridge lo detecta y degrada a file-RPC.
+  Medido: TCP 0/5, file-RPC 5/5.
+- **C3. `OnIdle` NUNCA se dispara.** `idle_ticks = 0` tras cargar el script.
+  Coincide con `docs/FL2025_SANDBOX.md` del repo `Boyan253/fl-studio-2025-ai-bridge`
+  (build 25.2.5 / v40). Cualquier pump desde `OnIdle` es un dead end.
+- **C4. El pump real es por MIDI.** El pump del file-RPC corre en `OnMidiIn` /
+  `OnMidiMsg`, no en `OnIdle`. **El MIDI no es el canal de datos, es el
+  despertador**: el servidor escribe la request y luego manda un byte MIDI al
+  puerto configurado para que FL despierte y la procese.
+- **C5. El file-RPC no tiene transporte alternativo posible.** `open()` sobre
+  ficheros normales es lo ÚNICO que el sandbox permite. No hay plan B.
+- **C6. Latencia medida: 21-63 ms, media ~42 ms** sobre 5 muestras. Limitada por
+  la latencia de `OnIdle`/MIDI de FL, no por el transporte. Por eso el TCP no
+  habría mejorado nada aunque funcionase: se bombea desde el mismo sitio.
+
+### El bridge de fLMCP v0.2.0 (el que está instalado)
+
+- 133 actions en 12 grupos: meta 3, transport 14, patterns 13, channels 20,
+  mixer 18, plugins 13, playlist 14, arrangement 5, automation 5, project 11,
+  ui 7, pianoroll 10. Catálogo en `crates/heretic-fl/src/bridge.rs::ACTIONS`.
+- **Los nombres son `camelCase`**: `transport.setTempo`, `channels.setVolume`.
+  No `set_tempo` / `set_volume`. Regresión ya cubierta por un test.
+- **Los params son `index`/`volume` (channels) y `track`/`volume` (mixer)**.
+- **Incluye `meta.exec`**: ejecuta una string de Python en el intérprete vivo.
+  Es la palanca de mayor alcance: da las ~250 funciones de FL sin escribir
+  handlers. Ver `docs/FL2025_SANDBOX.md`, sección "Breakthrough 1".
+- Limitaciones conocidas: `os.rename` bloqueado → la respuesta se escribe
+  **sin atomicidad** (el lector debe tolerar JSON a medias); ficheros fijos
+  (no mailbox) → riesgo de colisión si hay dos peticiones simultáneas.
+
+### Estado de la decisión sobre el transporte
+
+- **VST3 plugin: DESCARTADO.** Se borraron `vst3-bridge/` y `fLMCP-bridge/`. Razón:
+  el plugin resultó ser un proxy que reenvía mensajes a un fichero JSON, sin
+  acceso a FL API (Image-Line no publica ningún SDK para VST3), y no compilaba
+  (CMake 4.3 vs VST3 SDK 3.7.7). Detalle en `git log c64565d..412db74`.
+- **MIDI SysEx: DESCARTADO** (commit `c64565d`, conservado solo como historia).
+- **file-RPC: lo único viable.** Ver C1-C5.

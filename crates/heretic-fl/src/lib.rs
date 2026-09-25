@@ -1,23 +1,44 @@
-//! `heretic-fl` — cliente TCP Rust al VST3 plugin.
+//! `heretic-fl` — cliente del fLMCP Bridge (controller script de FL Studio).
 //!
-//! ## Topología
+//! # Topología
 //!
 //! ```text
-//! [daemon Rust] --TCP 127.0.0.1:9790--> [VST3 plugin] --file-RPC--> [FL Heretic Bridge] --FL API--> FL Studio
+//! [MCP server] ──Named Pipe──> [daemon blindado] ──file-RPC──> [FL Heretic Bridge] ──FL API──> FL Studio
+//!                                  (Rust)                 (2 ficheros JSON)
 //! ```
 //!
-//! El VST3 plugin corre dentro de FL Studio y actúa como proxy TCP↔file-RPC.
-//! Este crate es el cliente TCP que habla con él.
+//! # Transporte
+//!
+//! Solo file-RPC. El bridge ofrece también un listener TCP en `127.0.0.1:9876`,
+//! pero **no funciona en FL Studio 2025**: el sandbox del sub-intérprete de
+//! Python no deja crear el objeto socket
+//! (`<slot wrapper '__init__' of '_socket.socket' objects> returned NULL`), y el
+//! propio bridge degrada a file-RPC. Medido: TCP 0/5, file-RPC 5/5 a ~42 ms
+//! (`tests/test_transports.py`). El TCP no mejoraría la latencia de todos modos,
+//! porque el bridge bombea ambos transportes desde el mismo `OnIdle()`.
+//!
+//! # Actions
+//!
+//! El bridge expone 133 actions (`bridge::ACTIONS`). Este crate da:
+//! - `FlBridge::call(action, params)` para reacharlas todas.
+//! - Helpers tipados (`play`, `set_tempo`, ...) para el camino caliente.
 
-#![forbid(unsafe_code)]
+// `deny` en vez de `forbid` porque el modulo `process` necesita `unsafe` para
+// la API Win32 (EnumWindows / PostMessageW). El `unsafe` esta acotado a ese
+// modulo: el resto del crate es safe.
+#![deny(unsafe_code)]
 #![warn(missing_debug_implementations)]
 
 pub mod bridge;
+pub mod file_rpc;
+pub mod midi;
+pub mod process;
 
-pub use bridge::{FlBridge, BridgeConfig, FlVersionInfo, SongPosition, TransportStatus};
+pub use bridge::{
+    default_script_dir, BridgeConfig, BridgeInfo, FlBridge, TransportStatus, ACTIONS,
+};
+pub use file_rpc::FileRpc;
+pub use process::{FlProcess, FlStatus, close, find_fl_exe, kill, launch, running_process, status};
 
-/// Default host del VST3 plugin.
-pub const DEFAULT_HOST: &str = "127.0.0.1";
-
-/// Default port del VST3 plugin (TCP server).
-pub const DEFAULT_PORT: u16 = 9790;
+/// Versión de crate.
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");

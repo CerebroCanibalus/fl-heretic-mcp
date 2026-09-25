@@ -20,7 +20,14 @@ tracing            = { workspace = true }
 
 # File I/O
 [target.'cfg(windows)'.dependencies]
-tokio = { workspace = true }
+tokio   = { workspace = true }
+# Para el control del proceso de FL Studio (EnumWindows / PostMessageW
+# / GetWindowThreadProcessId). El sandbox de FL no tiene nada de esto: el
+# control de proceso vive aqui, en el daemon, fuera de FL.
+windows  = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_UI_WindowsAndMessaging",
+] }
 
 [dev-dependencies]
 tempfile   = "3.13"

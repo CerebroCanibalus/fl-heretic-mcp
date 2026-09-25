@@ -41,6 +41,9 @@ impl Transport {
             "get_play_state" => self.get_play_state().await,
             "get_song_position" => self.get_song_position().await,
             "set_song_position" => self.set_song_position(params).await,
+            "call" => self.call(params).await,
+            "actions" => self.actions().await,
+            "call" => self.call(params).await,
             other => Err(HereticError::InvalidRequest(format!(
                 "método transport desconocido: {other}"
             ))),
@@ -64,12 +67,20 @@ impl Transport {
         }))
     }
 
-    /// `health` — estado del bridge.
+    /// `health` — estado del bridge y del proceso de FL Studio.
     pub async fn health(&self) -> Result<Value> {
-        let ping_ok = self.bridge.is_alive().await;
+        let info = self.bridge.ping().await.ok();
+        let proc = heretic_fl::running_process();
         Ok(json!({
-            "alive": ping_ok,
-            "bridge": "vst3-tcp-proxy",
+            "bridge_online": info.is_some(),
+            "bridge_version": info.as_ref().map(|i| i.bridge_version.clone()),
+            "fl_version": info.as_ref().map(|i| i.fl_version.clone()),
+            "fl_uptime_sec": info.as_ref().map(|i| i.uptime_sec),
+            "fl_process_running": proc.is_some(),
+            "fl_pid": proc.as_ref().map(|p| p.pid),
+            "fl_exe": heretic_fl::find_fl_exe().map(|p| p.display().to_string()),
+            "midi_wake_ports": heretic_fl::midi::open_all(),
+            "transport": "file-rpc + midi-wake",
         }))
     }
 
@@ -135,12 +146,54 @@ impl Transport {
             .get("unit")
             .and_then(|v| v.as_str())
             .unwrap_or("bars");
-        let status = self.bridge.set_position(position, unit).await?;
+        self.bridge.set_position(position, unit).await?;
+        // El bridge devuelve solo un eco de la posicion; se relee el estado
+        // real para no mentirle a quien llama.
+        let status = self.bridge.transport_status().await?;
         Ok(json!({
             "position_ticks": status.position_ticks,
             "position_bars": status.position_bars,
             "position_seconds": status.position_seconds,
             "bpm": status.bpm,
+        }))
+    }
+
+    /// `call` — escape hatch a CUALQUIER action del bridge.
+    ///
+    /// Da acceso a las 67 actions sin escribir un handler MCP por cada una.
+    /// El catalogo esta en `heretic_fl::bridge::ACTIONS`.
+    /// Parametros: `{ "action": "channels.setVolume", "params": { ... } }`.
+    pub async fn call(&self, params: Value) -> Result<Value> {
+        let action = params
+            .get("action")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| HereticError::InvalidRequest("call: falta 'action'".into()))?
+            .to_string();
+        if !FlBridge::is_known_action(&action) {
+            tracing::warn!(
+                action,
+                "action fuera del catalogo compilado; se envia igualmente. \
+                 Usa fl_actions para ver el catalogo."
+            );
+        }
+        let p = params.get("params").cloned().unwrap_or(json!({}));
+        self.bridge.call(&action, p).await
+    }
+
+    /// `actions` — catalogo de actions que el bridge declara.
+    pub async fn actions(&self) -> Result<Value> {
+        let known: Vec<&str> = heretic_fl::ACTIONS.to_vec();
+        // Se le pregunta al bridge de verdad, que puede tener mas.
+        let live = self.bridge.call("meta.actions", json!({})).await.ok();
+        let live_list: Vec<String> = live
+            .and_then(|v| v.get("actions").cloned())
+            .and_then(|v| serde_json::from_value(v).ok())
+            .unwrap_or_default();
+        Ok(json!({
+            "compiled_catalog": known,
+            "compiled_count": known.len(),
+            "bridge_reported": live_list,
+            "bridge_count": live_list.len(),
         }))
     }
 }

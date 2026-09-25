@@ -1,29 +1,41 @@
-//! Named Pipe server + JSON-RPC dispatch (Fase 2.5).
+//! Named Pipe server + JSON-RPC dispatch.
 //!
-//! Adaptado al protocolo fLMCP Bridge (file-RPC + TCP). NO usa MIDI SysEx.
+//! Topologia completa:
 //!
-//! Flujo:
-//! 1. Cargar token + audit log.
-//! 2. Crear `FlBridge` (fLMCP Bridge) — file-RPC + TCP con fallback.
-//! 3. Health check: `meta.ping` para verificar que el bridge responde.
-//! 4. Bind Named Pipe + accept loop.
-//! 5. Por cada cliente: handshake HMAC + dispatch loop usando `Transport`.
+//! ```text
+//! [MCP server] --Named Pipe+HMAC--> [daemon] --file-RPC--> [FL Heretic Bridge] --FL API--> FL Studio
+//!                                       |                                              ^
+//!                                       +--MIDI out (wake)--------------------------+
+//!                                       +--WM_CLOSE / CreateProcess (proceso FL)----+
+//! ```
 //!
-//! ## Handlers disponibles (Fase 2.5)
+//! El daemon tiene dos vias hacia FL Studio, porque el sandbox del script de FL
+//! no permite nada de lo que hace falta para gestionar proyectos:
 //!
-//! | Método                 | Handler      | Action fLMCP Bridge    |
-//! |------------------------|--------------|------------------------|
-//! | `ping`                 | daemon       | (no requiere bridge)   |
-//! | `health`               | daemon       | bridge.health()        |
-//! | `get_tempo`            | transport    | `transport.status`     |
-//! | `set_tempo`            | transport    | `transport.set_tempo`  |
-//! | `play`                 | transport    | `transport.start`      |
-//! | `stop`                 | transport    | `transport.stop`       |
-//! | `get_play_state`       | transport    | `transport.status`     |
-//! | `get_song_position`    | transport    | `transport.status`     |
-//! | `set_song_position`    | transport    | `transport.set_position`|
+//! | Necesidad | Via | Por que
+//! |---|---|---|
+//! | Guardar proyecto | bridge (`FPT_Save`) | el script si puede ejecutar el atajo
+//! | Abrir proyecto   | daemon (`CreateProcess`) | `dir(general)` no tiene nada de abrir
+//! | Cerrar proyecto  | daemon (`WM_CLOSE`)    | no hay `FPT_Close`
+//! | Despertar FL     | daemon (MIDI out)      | `OnIdle` no se dispara; el pump real es `OnMidiIn`
 //!
-//! Fase 3 añadirá el resto de las 133 actions (mixer, channels, plugins, etc.)
+//! ## Handlers disponibles
+//!
+//! | Metodo              | Handler      | Action del bridge           |
+//! |---------------------|--------------|-----------------------------|
+//! | `ping`              | transport    | `meta.ping`                 |
+//! | `health`            | transport    | ping real                   |
+//! | `get_tempo`         | transport    | `transport.status`          |
+//! | `set_tempo`         | transport    | `transport.setTempo`        |
+//! | `play`              | transport    | `transport.start`           |
+//! | `stop`              | transport    | `transport.stop`            |
+//! | `get_play_state`    | transport    | `transport.status`          |
+//! | `get_song_position` | transport    | `transport.status`          |
+//! | `set_song_position` | transport    | `transport.setPosition`     |
+//! | `call`              | transport    | cualquier action           |
+//! | `fl_open`           | lifecycle    | `CreateProcess`             |
+//! | `fl_close`          | lifecycle    | `WM_CLOSE`                  |
+//! | `fl_status`         | lifecycle    | proceso + ping              |
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -39,7 +51,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::windows::named_pipe::{NamedPipeServer, ServerOptions};
 
 use heretic_fl::{BridgeConfig, FlBridge};
-use crate::handlers::Transport;
+use crate::handlers::{Lifecycle, Transport};
 
 /// Config del daemon.
 #[derive(Debug, Clone)]
@@ -47,7 +59,9 @@ pub struct Config {
     pub pipe_name: String,
     pub token_path: PathBuf,
     pub audit_path: PathBuf,
-    /// Si true, verifica el VST3 plugin con meta.ping antes de aceptar clientes.
+    /// Directorio del FL Heretic Bridge (donde vive el controller script).
+    pub script_dir: PathBuf,
+    /// Si true, verifica el bridge con meta.ping antes de aceptar clientes.
     pub wait_for_bridge: bool,
 }
 
@@ -61,6 +75,7 @@ impl Config {
             audit_path: audit
                 .map(PathBuf::from)
                 .unwrap_or_else(AuditLog::default_path),
+            script_dir: heretic_fl::default_script_dir(),
             wait_for_bridge: true,
         }
     }
@@ -84,7 +99,7 @@ pub fn run(
     tracing::info!("  pipe:       {}", config.pipe_name);
     tracing::info!("  token:      {}", config.token_path.display());
     tracing::info!("  audit:      {}", config.audit_path.display());
-    tracing::info!("  vst3 host:  127.0.0.1:{} (proxy TCP)", heretic_fl::DEFAULT_PORT);
+    tracing::info!("  bridge:     {}", config.script_dir.display());
 
     // Cargar token (crear si no existe)
     let store = TokenStore::new(config.token_path.clone());
@@ -116,35 +131,42 @@ async fn serve(
     token: Token,
     audit: Arc<AuditLog>,
 ) -> Result<(), HereticError> {
-    // 1. Crear bridge fLMCP (file-RPC + TCP)
+    // 1. Cliente file-RPC del FL Heretic Bridge.
     let bridge_config = BridgeConfig {
-        host: heretic_fl::DEFAULT_HOST.into(),
-        port: heretic_fl::DEFAULT_PORT,
+        script_dir: config.script_dir.clone(),
         timeout: std::time::Duration::from_secs(10),
     };
-    let bridge = FlBridge::connect(bridge_config)
-        .map_err(|e| HereticError::Other(format!("creando bridge fLMCP: {e}")))?;
-    tracing::info!("  bridge: TCP 127.0.0.1:{} (VST3 proxy)", bridge.config().port);
+    let bridge = FlBridge::with_config(bridge_config)
+        .map_err(|e| HereticError::Other(format!("creando FL Heretic Bridge: {e}")))?;
+
+    // El wake por MIDI necesita los puertos OUT ABIERTOS de forma persistente.
+    // Abrirlos y cerrarlos en cada peticion hacia que FL no reciba nada y el
+    // pump no se dispare nunca (medido: pump_count se queda en 0).
+    let midi_ports = heretic_fl::midi::open_all();
+    tracing::info!("  MIDI out:   {midi_ports} puerto(s) abiertos (wake)");
 
     if config.wait_for_bridge {
-        tracing::info!("verificando conexión al VST3 plugin (meta.ping)...");
+        tracing::info!("verificando FL Heretic Bridge (meta.ping)...");
         match bridge.ping().await {
             Ok(info) => {
                 tracing::info!(
-                    "  VST3 OK: bridge={} fl={} uptime={}s",
+                    "  bridge OK: v={} fl={} uptime={}s",
                     info.bridge_version, info.fl_version, info.uptime_sec
                 );
             }
             Err(e) => {
-                tracing::error!("  VST3 no responde: {e}");
+                tracing::error!("  bridge no responde: {e}");
                 return Err(HereticError::Other(format!(
-                    "VST3 no responde: {e}. ¿FL Studio está corriendo con el plugin 'FL Heretic Bridge' cargado?"
+                    "FL Heretic Bridge no responde: {e}.\n\
+                     ¿Está FL Studio abierto con el controller script \
+                     'FL Heretic Bridge' seleccionado en Options > MIDI Settings?"
                 )));
             }
         }
     }
 
-    let transport = Arc::new(Transport::new(bridge));
+    let transport = Arc::new(Transport::new(bridge.clone()));
+    let lifecycle = Arc::new(Lifecycle::new(bridge));
 
     // 2. Bind Named Pipe
     let mut server = ServerOptions::new()
@@ -166,8 +188,9 @@ async fn serve(
         let verifier = Arc::new(AuthVerifier::new(token.clone()));
         let audit = audit.clone();
         let transport = transport.clone();
+        let lifecycle = lifecycle.clone();
         tokio::spawn(async move {
-            if let Err(e) = handle_client(client, verifier, audit, transport).await {
+            if let Err(e) = handle_client(client, verifier, audit, transport, lifecycle).await {
                 tracing::warn!("client disconnected: {e}");
             }
         });
@@ -180,6 +203,7 @@ async fn handle_client(
     verifier: Arc<AuthVerifier>,
     audit: Arc<AuditLog>,
     transport: Arc<Transport>,
+    lifecycle: Arc<Lifecycle>,
 ) -> Result<(), HereticError> {
     let (read_half, mut write_half) = tokio::io::split(client);
     let mut reader = BufReader::new(read_half);
@@ -235,7 +259,7 @@ async fn handle_client(
 
         // Dispatch (daemon-level o transport)
         let started = std::time::Instant::now();
-        let response = dispatch(&request, &transport).await;
+        let response = dispatch(&request, &transport, &lifecycle).await;
         let duration_ms = started.elapsed().as_millis() as u64;
 
         // Audit log
@@ -274,10 +298,23 @@ async fn send_response<W: tokio::io::AsyncWrite + Unpin>(
     Ok(())
 }
 
-/// Dispatch un Request al handler apropiado. Primero intenta transport; si no
-/// es un método transport, usa el fallback del daemon (`ping`/`health`).
-async fn dispatch(req: &Request, transport: &Transport) -> Response {
-    match transport.dispatch(req.tool_name(), req.params_or_empty()).await {
+/// Nombres de metodo que son de lifecycle (control del proceso de FL), no
+/// de FL Studio. Se comprueban ANTES que los de transport para que `status`,
+/// por ejemplo, no choque con el `status` del transporte.
+const LIFECYCLE_METHODS: &[&str] = &[
+    "open", "launch", "save", "save_as", "close", "fl_status", "wait_ready",
+];
+
+/// Dispatch un Request al handler apropiado.
+async fn dispatch(req: &Request, transport: &Transport, lifecycle: &Lifecycle) -> Response {
+    let name = req.tool_name();
+    let result = if LIFECYCLE_METHODS.contains(&name) {
+        let method = name.strip_prefix("fl_").unwrap_or(name);
+        lifecycle.dispatch(method, req.params_or_empty()).await
+    } else {
+        transport.dispatch(name, req.params_or_empty()).await
+    };
+    match result {
         Ok(data) => Response::ok(req.id.clone(), data),
         Err(e) => Response::from_heretic(&req.id, &e),
     }
