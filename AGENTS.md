@@ -219,14 +219,48 @@ Crate futuro (no en Fase 0+1):
 - [x] Compila (`cargo build --workspace` y `cargo build --release`)
 - [x] **Smoke test end-to-end verificado** (ver §7 changelog)
 
-### Fase 2 — Bridge MIDI + tools transport
-- [ ] Port del controller script (`legacy/.../device_FLStudioMCP.py`) → handlers Rust
-- [ ] Nuevo crate `heretic-fl` con `midi.rs` — MIDI SysEx bridge (crate `midir`)
-- [ ] Heartbeat detection (500ms desde `OnIdle` del controller script legacy)
-- [ ] Tools transport: `fl_ping`, `fl_get_tempo`, `fl_set_tempo`, `fl_play`, `fl_stop`, `fl_get_song_position`, `fl_set_song_position`
-- [ ] Nuevo crate `heretic-mcp` — MCP server con FlojoMCP (path dep), reenvía al daemon via Named Pipe
-- [ ] End-to-end: Claude → MCP server (stdio) → daemon (Named Pipe) → MIDI → FL → respuesta
-- [ ] Portar el controller script Python actualizado a FL Studio (sync con `legacy/.../device_FLStudioMCP.py`)
+### Fase 2 — VST3 plugin + daemon TCP
+- [ ] Setup `vst3-bridge/` con CMake + VST3 SDK
+- [ ] Plugin mínimo: arranca WS/TCP server + responde `meta.ping`
+- [ ] Handlers: transport (start/stop/tempo/status), mixer básico
+- [ ] Daemon re-escrito: cliente TCP al plugin
+- [ ] Compilación Windows (MSVC + CMake) — primera build
+- [ ] **Smoke test**: daemon → plugin → FL API real → respuesta
+
+### Fase 2.5 — Instalador automático (ONE-SHOT)
+- [ ] PowerShell script: detecta FL Studio + MSVC + clona SDK
+- [ ] Compila VST3 + copia a `%COMMONPROGRAMFILES%\VST3\`
+- [ ] Crea template .flp con plugin pre-cargado
+- [ ] Configura FL: template como "Default project"
+- [ ] Compila daemon Rust (release)
+- [ ] Configura MCP server en opencode.jsonc
+- [ ] Genera token + audit DB
+- [ ] Inicia daemon como servicio de Windows
+- [ ] Verifica conexión con `meta.ping`
+- [ ] **Resultado**: usuario corre 1 comando, todo funciona
+
+### Fase 3 — Handlers completos (acceso TOTAL FL API)
+- [ ] channels (CRUD + parámetros)
+- [ ] mixer (tracks, sends, EQ)
+- [ ] plugins (parameters, presets)
+- [ ] patterns (notes, step sequencer)
+- [ ] playlist (clips, markers)
+- [ ] arrangement
+- [ ] automation (record + edit)
+- [ ] project (load, save, undo)
+- [ ] ui (windows, hints)
+
+### Fase 4 — Features avanzadas
+- [ ] Streaming audio en vivo (master output, tracks individuales)
+- [ ] Mutex/lock thread-safe (audio thread ↔ API calls)
+- [ ] State manager + cache invalidation
+- [ ] Re-uso del bridge script como "auto-loader" opcional
+
+### Fase 5 — Maduración
+- [ ] Distribución installer (MSI/EXE)
+- [ ] Signature digital del plugin
+- [ ] Cert VST3 si aplica
+- [ ] Documentación completa + SKILL.md
 
 ### Fase 3 — Port completo de tools (drop-in replacement)
 - [ ] Port de las 67 tools del FLStudioMCP al MCP server Rust
