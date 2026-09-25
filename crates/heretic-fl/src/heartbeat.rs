@@ -8,7 +8,7 @@ use serde_json::Value;
 use tokio::sync::Mutex;
 
 use heretic_core::HereticError;
-use crate::{HEARTBEAT_STALE_MS, HEARTBEAT_INTERVAL_MS};
+use crate::HEARTBEAT_STALE_MS;
 
 /// Estado de un heartbeat recibido.
 #[derive(Debug, Clone)]

@@ -42,7 +42,7 @@ pub mod bridge;
 pub use bridge::{FlBridge, BridgeConfig, FlVersionInfo, SongPosition};
 pub use heartbeat::HeartbeatTracker;
 pub use midi::{MidiPorts, open_midi_ports};
-pub use sysex::{Direction, ProtocolVersion, encode_message, decode_message, new_request_id};
+pub use sysex::{Direction, encode_message, decode_message, new_request_id};
 
 /// Versión de protocolo MIDI (mirror de `PROTOCOL_VERSION = 2` en legacy).
 pub const MIDI_PROTOCOL_VERSION: u32 = 2;

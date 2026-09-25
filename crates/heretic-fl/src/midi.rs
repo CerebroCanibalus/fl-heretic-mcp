@@ -3,8 +3,6 @@
 //! Detecta los puertos loopMIDI (Windows) o IAC Driver (macOS) por nombre,
 //! los abre, y devuelve las conexiones listas para I/O.
 
-use std::collections::HashMap;
-
 use midir::{MidiInput, MidiInputConnection, MidiInputPort, MidiOutput, MidiOutputConnection, MidiOutputPort};
 
 use heretic_core::{HereticError, Result};
@@ -22,8 +20,8 @@ pub fn list_ports() -> Vec<String> {
         Err(_) => return vec![],
     };
     let mut ports = Vec::new();
-    ports.extend(midi_out.ports().iter().filter_map(|p| p.name().ok()));
-    ports.extend(midi_in.ports().iter().filter_map(|p| p.name().ok()));
+    ports.extend(midi_out.ports().iter().filter_map(|p| midi_out.port_name(p).ok()));
+    ports.extend(midi_in.ports().iter().filter_map(|p| midi_in.port_name(p).ok()));
     ports
 }
 
@@ -37,18 +35,25 @@ pub struct MidiPorts {
 impl MidiPorts {
     /// Enumera puertos actualmente visibles al proceso.
     pub fn snapshot() -> Self {
-        let midi_out = MidiOutput::new("fl-heretic-snap").ok();
-        let midi_in = MidiInput::new("fl-heretic-snap").ok();
-        Self {
-            outputs: midi_out
-                .as_ref()
-                .map(|m| m.ports().iter().filter_map(|p| p.name().ok()).collect())
-                .unwrap_or_default(),
-            inputs: midi_in
-                .as_ref()
-                .map(|m| m.ports().iter().filter_map(|p| p.name().ok()).collect())
-                .unwrap_or_default(),
-        }
+        let outputs = MidiOutput::new("fl-heretic-snap")
+            .ok()
+            .map(|m| {
+                m.ports()
+                    .iter()
+                    .filter_map(|p| m.port_name(p).ok())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let inputs = MidiInput::new("fl-heretic-snap")
+            .ok()
+            .map(|m| {
+                m.ports()
+                    .iter()
+                    .filter_map(|p| m.port_name(p).ok())
+                    .collect()
+            })
+            .unwrap_or_default();
+        Self { outputs, inputs }
     }
 
     /// Busca un puerto output por patrón (case-insensitive substring).
@@ -76,8 +81,8 @@ impl MidiPorts {
 /// - `send_sysex()` para enviar requests al controller script
 /// - `incoming_rx` para recibir responses + heartbeats desde FL
 pub struct MidiConnection {
-    /// Output connection (server → FL). Posee el lock del puerto output.
-    pub out: MidiOutputConnection,
+    /// Output connection (server → FL). Wrap en `Mutex` porque `send()` requiere `&mut self`.
+    pub out: std::sync::Mutex<MidiOutputConnection>,
     /// Input connection (FL → server). Mientras esté vivo, el callback sigue activo.
     /// Se guarda aquí solo para que no se dropee (al dropear, el callback se desconecta).
     _in: MidiInputConnection<()>,
@@ -118,25 +123,25 @@ pub fn open_midi_ports(
     let midi_in = MidiInput::new(client_name)
         .map_err(|e| HereticError::Other(format!("MidiInput::new: {e}")))?;
 
-    let out_port = find_output_port(&midi_out.ports(), to_fl).ok_or_else(|| {
+    let out_port = find_output_port(&midi_out, &midi_out.ports(), to_fl).ok_or_else(|| {
         HereticError::Other(format!(
             "OUTPUT MIDI port matching {:?} no encontrado. Disponibles: {:?}. \
              Crear el puerto en loopMIDI (Windows) o IAC Driver (macOS), \
              o setear FL_HERETIC_PORT_TO_FL.",
             to_fl,
-            midi_out.ports().iter().filter_map(|p| p.name().ok()).collect::<Vec<_>>()
+            midi_out.ports().iter().filter_map(|p| midi_out.port_name(p).ok()).collect::<Vec<_>>()
         ))
     })?;
-    let in_port = find_input_port(&midi_in.ports(), from_fl).ok_or_else(|| {
+    let in_port = find_input_port(&midi_in, &midi_in.ports(), from_fl).ok_or_else(|| {
         HereticError::Other(format!(
             "INPUT MIDI port matching {:?} no encontrado. Disponibles: {:?}.",
             from_fl,
-            midi_in.ports().iter().filter_map(|p| p.name().ok()).collect::<Vec<_>>()
+            midi_in.ports().iter().filter_map(|p| midi_in.port_name(p).ok()).collect::<Vec<_>>()
         ))
     })?;
 
-    let out_port_name = out_port.name().unwrap_or_else(|_| "<unnamed>".into());
-    let in_port_name = in_port.name().unwrap_or_else(|_| "<unnamed>".into());
+    let out_port_name = midi_out.port_name(&out_port).unwrap_or_else(|_| "<unnamed>".into());
+    let in_port_name = midi_in.port_name(&in_port).unwrap_or_else(|_| "<unnamed>".into());
 
     // Channel para mensajes SysEx entrantes (filtrados por magic)
     let (in_tx, in_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
@@ -162,6 +167,8 @@ pub fn open_midi_ports(
         .connect(&out_port, "FLStudioMCP RX")
         .map_err(|e| HereticError::Other(format!("MidiOutput::connect: {e}")))?;
 
+    let out = std::sync::Mutex::new(out);
+
     Ok(MidiConnection {
         out,
         _in,
@@ -172,10 +179,14 @@ pub fn open_midi_ports(
 }
 
 /// Helper: encuentra el primer puerto OUTPUT cuyo nombre contiene el patrón.
-fn find_output_port(ports: &[MidiOutputPort], pattern: &str) -> Option<MidiOutputPort> {
+fn find_output_port(
+    midi_out: &MidiOutput,
+    ports: &[MidiOutputPort],
+    pattern: &str,
+) -> Option<MidiOutputPort> {
     let needle = pattern.to_lowercase();
     for p in ports {
-        if let Ok(name) = p.name() {
+        if let Ok(name) = midi_out.port_name(p) {
             if name.to_lowercase().contains(&needle) {
                 return Some(p.clone());
             }
@@ -185,10 +196,14 @@ fn find_output_port(ports: &[MidiOutputPort], pattern: &str) -> Option<MidiOutpu
 }
 
 /// Helper: encuentra el primer puerto INPUT cuyo nombre contiene el patrón.
-fn find_input_port(ports: &[MidiInputPort], pattern: &str) -> Option<MidiInputPort> {
+fn find_input_port(
+    midi_in: &MidiInput,
+    ports: &[MidiInputPort],
+    pattern: &str,
+) -> Option<MidiInputPort> {
     let needle = pattern.to_lowercase();
     for p in ports {
-        if let Ok(name) = p.name() {
+        if let Ok(name) = midi_in.port_name(p) {
             if name.to_lowercase().contains(&needle) {
                 return Some(p.clone());
             }
@@ -198,12 +213,13 @@ fn find_input_port(ports: &[MidiInputPort], pattern: &str) -> Option<MidiInputPo
 }
 
 /// Envía un mensaje SysEx a FL (añade framing F0/F7 que algunos drivers esperan).
-pub fn send_sysex(out: &MidiOutputConnection, payload: &[u8]) -> Result<()> {
+pub fn send_sysex(out: &std::sync::Mutex<MidiOutputConnection>, payload: &[u8]) -> Result<()> {
     let mut framed = Vec::with_capacity(payload.len() + 2);
     framed.push(0xF0);
     framed.extend_from_slice(payload);
     framed.push(0xF7);
-    out.send(&framed)
+    let mut g = out.lock().expect("midi out mutex poisoned");
+    g.send(&framed)
         .map_err(|e| HereticError::Other(format!("MidiOutputConnection::send: {e}")))?;
     Ok(())
 }

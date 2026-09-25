@@ -31,13 +31,15 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use tokio::sync::{mpsc, oneshot, Mutex as TokioMutex};
+use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
 use heretic_core::{HereticError, Result};
 use crate::heartbeat::HeartbeatTracker;
 use crate::midi::{open_midi_ports, send_sysex, MidiConnection};
 use crate::sysex::{decode_message, encode_message, new_request_id, Direction};
+#[allow(unused_imports)]
+use std::collections::HashMap;
 
 /// Config del bridge.
 #[derive(Debug, Clone)]
@@ -102,7 +104,8 @@ struct FlBridgeInner {
     request_tx: mpsc::UnboundedSender<BridgeRequest>,
     /// Heartbeat tracker (compartido con el worker).
     heartbeat: HeartbeatTracker,
-    /// Cancel token para apagar el worker limpiamente.
+    /// Cancel token para apagar el worker limpiamente (Fase 5 lo usará para shutdown ordenado).
+    #[allow(dead_code)]
     cancel: CancellationToken,
 }
 
@@ -319,8 +322,8 @@ fn run_midi_worker(
     cancel: CancellationToken,
 ) {
     // Map: request_id -> oneshot::Sender para entregar el response cuando llegue.
-    let pending: TokioMutex<std::collections::HashMap<String, oneshot::Sender<Result<Value>>>> =
-        TokioMutex::new(std::collections::HashMap::new());
+    let pending: std::sync::Mutex<HashMap<String, oneshot::Sender<Result<Value>>>> =
+        std::sync::Mutex::new(HashMap::new());
 
     // Bloqueamos el thread en el recv de MIDI. No podemos await en std::thread.
     // Pero mpsc::UnboundedReceiver se puede usar sync vía `try_recv` + sleep, o
@@ -346,7 +349,7 @@ fn run_midi_worker(
                 continue;
             }
             // Guardamos el oneshot para entregar el response cuando llegue
-            let mut p = pending.try_lock().expect("single-thread worker");
+            let mut p = pending.lock().expect("single-thread worker");
             p.insert(id, req.response);
         }
 
@@ -368,7 +371,7 @@ fn run_midi_worker(
                         // Response → match por request_id y entregar
                         let id = decoded.request_id.clone();
                         let payload = decoded.payload.clone();
-                        let mut p = match pending.try_lock() {
+                        let mut p = match pending.lock() {
                             Ok(g) => g,
                             Err(_) => continue,
                         };

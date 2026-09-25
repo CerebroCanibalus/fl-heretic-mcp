@@ -2,33 +2,16 @@
 //!
 //! Punto de entrada: arranca el server FlojoMCP que habla JSON-RPC sobre stdio
 //! y reenvía cada tool call al daemon blindado via Named Pipe.
-//!
-//! ## Uso
-//!
-//! Configurar en `~/.config/opencode/opencode.jsonc` (o equivalente del MCP client):
-//!
-//! ```json
-//! {
-//!   "mcpServers": {
-//!     "fl-studio": {
-//!       "command": "D:\\Mis Juegos\\ClaudeMCPs\\FLHereticMCP\\target\\release\\fl-heretic-mcp.exe",
-//!       "env": {
-//!         "FL_HERETIC_PIPE": "\\\\.\\pipe\\fl-heretic-12345",
-//!         "RUST_LOG": "info"
-//!       }
-//!     }
-//!   }
-//! }
-//! ```
-//!
-//! El daemon publica su PID al arrancar en el log; el usuario lo copia al config
-//! (Fase 5 introducirá auto-discovery via archivo well-known).
 
 use flojo_mcp::prelude::*;
 use tracing_subscriber::EnvFilter;
 
-#[path = "../src/tools.rs"]
-mod tools;
+// Re-export para forzar el registro de los `#[tool]` (inventory)
+// (Comentario: el `use` no es estrictamente necesario — `inventory::collect!`
+//  en FlojoMCP escanea el binario. Pero referenciar el módulo asegura
+//  que las funciones no se eliminen por optimización.)
+#[allow(unused_imports)]
+use heretic_mcp::tools as _tools;
 
 /// Struct vacío que FlojoMCP descubre automáticamente las tools con `#[tool]`.
 #[flojo_mcp(name = "fl-heretic-mcp", version = "0.1.0")]

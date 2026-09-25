@@ -4,11 +4,8 @@
 //! Se conecta por tool call (no pooling en Fase 2 — Fase 5 introducirá
 //! un connection pool reutilizable).
 
-use std::time::Duration;
-
 use heretic_core::{
-    AuthChallenge, AuthResponse, AuthVerifier, HereticError, Request, RequestId, Response,
-    Token, TokenStore,
+    AuthChallenge, AuthVerifier, HereticError, Request, Response, Token, TokenStore,
 };
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -72,20 +69,13 @@ impl DaemonClient {
 
     #[cfg(windows)]
     async fn call_windows(&self, method: &str, params: Value) -> Result<Value> {
-        // 1. Conectar al Named Pipe
-        let client = tokio::time::timeout(
-            Duration::from_secs(5),
-            ClientOptions::new().open(&self.pipe_name),
-        )
-        .await
-        .map_err(|_| HereticError::Other(format!(
-            "timeout conectando a {} (¿daemon corriendo?)",
-            self.pipe_name
-        )))?
-        .map_err(|e| HereticError::Other(format!(
-            "No se pudo conectar al daemon en {}: {}. ¿Está corriendo?",
-            self.pipe_name, e
-        )))?;
+        // 1. Conectar al Named Pipe (síncrono — tokio's ClientOptions::open no es async)
+        let client = ClientOptions::new()
+            .open(&self.pipe_name)
+            .map_err(|e| HereticError::Other(format!(
+                "No se pudo conectar al daemon en {}: {}. ¿Está corriendo?",
+                self.pipe_name, e
+            )))?;
 
         let (read_half, mut write_half) = tokio::io::split(client);
         let mut reader = BufReader::new(read_half);
@@ -125,8 +115,8 @@ impl DaemonClient {
         }
 
         // 6. Construir y enviar Request
-        let request_id: RequestId = format!("req-{}", uuid_like_id());
-        let request = Request::new(request_id.clone(), method, params);
+        let request_id = format!("req-{}", uuid_like_id());
+        let request = Request::new(request_id, method, params);
         let req_json = serde_json::to_string(&request)? + "\n";
         write_half.write_all(req_json.as_bytes()).await?;
         write_half.flush().await?;

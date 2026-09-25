@@ -20,6 +20,7 @@ use tracing_subscriber::EnvFilter;
 
 mod pipe;
 mod commands;
+mod handlers;
 use commands::TokenCmd;
 
 /// Binario principal de FL Heretic MCP.
