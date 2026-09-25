@@ -1,18 +1,17 @@
 [package]
-name        = "heretic-daemon"
+name        = "heretic-mcp"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
-description = "Daemon blindado que controla FL Studio via Named Pipe + MIDI"
+description = "MCP server stdio (FlojoMCP) que reenvía comandos al daemon blindado via Named Pipe"
 
 [[bin]]
-name = "fl-heretic"
+name = "fl-heretic-mcp"
 path = "src/main.rs"
 
 [dependencies]
 heretic-core       = { path = "../heretic-core" }
-heretic-fl         = { path = "../heretic-fl" }
 flojo-mcp          = { workspace = true }
 
 tokio              = { workspace = true }
@@ -24,12 +23,11 @@ anyhow             = { workspace = true }
 thiserror          = { workspace = true }
 tracing            = { workspace = true }
 tracing-subscriber = { workspace = true }
-clap               = { workspace = true }
 
 # Windows: Named Pipes
 [target.'cfg(windows)'.dependencies]
 tokio = { workspace = true }
 
 [dev-dependencies]
-tempfile   = "3.13"
-tokio      = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tempfile = "3.13"
+tokio    = { workspace = true, features = ["macros", "rt-multi-thread"] }

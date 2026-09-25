@@ -3,6 +3,8 @@ resolver = "2"
 members = [
     "crates/heretic-core",
     "crates/heretic-daemon",
+    "crates/heretic-fl",
+    "crates/heretic-mcp",
     "examples/ping",
 ]
 

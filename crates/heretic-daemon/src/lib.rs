@@ -5,3 +5,4 @@
 
 pub mod pipe;
 pub mod commands;
+pub mod handlers;

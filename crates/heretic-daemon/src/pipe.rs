@@ -1,35 +1,27 @@
-//! Named Pipe server + JSON-RPC dispatch (Fase 1).
+//! Named Pipe server + JSON-RPC dispatch (Fase 2).
 //!
-//! Topología:
+//! Flujo:
+//! 1. Cargar token + audit log.
+//! 2. Abrir bridge MIDI (heretic-fl) — abre loopMIDI ports + MIDI worker.
+//! 3. Esperar primer heartbeat (FL está corriendo con controller script).
+//! 4. Bind Named Pipe + accept loop.
+//! 5. Por cada cliente: handshake HMAC + dispatch loop usando `Transport`.
 //!
-//! ```text
-//! [cliente MCP]  --Named Pipe JSON-RPC NDJSON-->  [este server]
-//!                                                        │
-//!                                                        ├─> AuthChallenge + AuthVerifier (HMAC)
-//!                                                        ├─> AuditLog (SQLite WAL append-only)
-//!                                                        └─> Dispatcher → handlers (ping, ...)
-//! ```
+//! ## Handlers disponibles (Fase 2)
 //!
-//! ## Fase 1: solo `ping`
+//! | Método                 | Handler      | Notas                          |
+//! |------------------------|--------------|--------------------------------|
+//! | `ping`                 | daemon       | Eco simple, no requiere FL     |
+//! | `health`               | daemon       | Estado del bridge MIDI         |
+//! | `get_tempo`            | transport    | BPM actual                     |
+//! | `set_tempo`            | transport    | Set BPM (10-999)               |
+//! | `play`                 | transport    | transport.start()              |
+//! | `stop`                 | transport    | transport.stop()               |
+//! | `get_play_state`       | transport    | playing + recording            |
+//! | `get_song_position`    | transport    | ms, ticks, beats, bpm           |
+//! | `set_song_position`    | transport    | por ms, beats, o ticks         |
 //!
-//! Implementa:
-//! 1. Bind Named Pipe `\\.\pipe\fl-heretic-<pid>`.
-//! 2. Accept connections en loop.
-//! 3. Por cada conexión: enviar `AuthChallenge`, esperar `AuthResponse`.
-//! 4. Si OK: marcar conexión autenticada.
-//! 5. Loop de requests: leer línea (NDJSON), dispatch, escribir response.
-//!
-//! Handlers implementados: `ping` (eco del daemon), `health` (estado).
-//!
-//! ## Multi-cliente
-//!
-//! Named Pipe en Windows permite múltiples instancias del mismo nombre.
-//! Cada conexión corre en su propio task. Aislamos por canal (cada conexión
-//! tiene su propio AuthVerifier — todos comparten el MISMO Token).
-//!
-//! ## Fase 2+
-//!
-//! Añadir: rate limit por tool, capability ACL, circuit breaker, watchdog.
+//! Fase 3 añadirá el resto de tools del FLStudioMCP legacy.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -38,11 +30,15 @@ use heretic_core::{
     AuditEvent, AuditLog, AuditStatus, AuthChallenge, AuthResponse, AuthVerifier, HereticError,
     Request, Response, Token, TokenStore,
 };
-use serde_json::json;
+use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
+use crate::handlers::Transport;
 #[cfg(windows)]
 use tokio::net::windows::named_pipe::{NamedPipeServer, ServerOptions};
+
+#[cfg(windows)]
+use heretic_fl::{BridgeConfig, FlBridge};
 
 /// Config del daemon.
 #[derive(Debug, Clone)]
@@ -50,26 +46,38 @@ pub struct Config {
     pub pipe_name: String,
     pub token_path: PathBuf,
     pub audit_path: PathBuf,
+    /// Patrón del puerto MIDI output. Default: `FLStudioMCP RX`.
+    pub midi_port_to_fl: Option<String>,
+    /// Patrón del puerto MIDI input. Default: `FLStudioMCP TX`.
+    pub midi_port_from_fl: Option<String>,
+    /// Cliente MIDI name (visible en FL > MIDI Settings). Default: `FLHeretic`.
+    pub midi_client_name: String,
+    /// Esperar primer heartbeat antes de retornar de `run()`. Default: true.
+    pub wait_for_heartbeat: bool,
 }
 
 impl Config {
     pub fn from_opts(pipe: Option<String>, token: Option<String>, audit: Option<String>) -> Self {
         Self {
-            pipe_name: pipe.unwrap_or_else(|| default_pipe_name()),
+            pipe_name: pipe.unwrap_or_else(default_pipe_name),
             token_path: token
                 .map(PathBuf::from)
                 .unwrap_or_else(TokenStore::default_path),
             audit_path: audit
                 .map(PathBuf::from)
                 .unwrap_or_else(AuditLog::default_path),
+            midi_port_to_fl: None,
+            midi_port_from_fl: None,
+            midi_client_name: "FLHeretic".into(),
+            wait_for_heartbeat: true,
         }
     }
 }
 
-/// Pipe name default: `\\.\pipe\fl-heretic-<pid>` (single-instance seguro).
+/// Pipe name default: `\\.\pipe\fl-heretic-<pid>`.
 pub fn default_pipe_name() -> String {
     let pid = std::process::id();
-    format!(r"\\.\pipe\fl-heretic-{}", pid)
+    format!(r"\\.\pipe\fl-heretic-{pid}")
 }
 
 /// Arranca el daemon (loop infinito).
@@ -80,11 +88,11 @@ pub fn run(
 ) -> Result<(), HereticError> {
     let config = Config::from_opts(pipe, token_path, audit_path);
 
-    // Tracing del arranque
     tracing::info!("daemon arrancando");
     tracing::info!("  pipe:    {}", config.pipe_name);
     tracing::info!("  token:   {}", config.token_path.display());
     tracing::info!("  audit:   {}", config.audit_path.display());
+    tracing::info!("  midi client: {}", config.midi_client_name);
 
     // Cargar token (crear si no existe)
     let store = TokenStore::new(config.token_path.clone());
@@ -95,7 +103,7 @@ pub fn run(
     let audit = Arc::new(AuditLog::open(config.audit_path.clone())?);
     tracing::info!("  audit log abierto ({} eventos previos)", audit.len().unwrap_or(0));
 
-    // Tokio runtime — el binario debe correr dentro de un runtime
+    // Tokio runtime
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .thread_name("fl-heretic")
@@ -107,34 +115,63 @@ pub fn run(
     })
 }
 
-/// Tokio async: bind + accept loop.
+/// Tokio async: abre MIDI bridge + bind Named Pipe + accept loop.
 #[cfg(windows)]
 async fn serve(
     config: Config,
     token: Token,
     audit: Arc<AuditLog>,
 ) -> Result<(), HereticError> {
+    // 1. Abrir MIDI bridge
+    let bridge_config = BridgeConfig {
+        port_to_fl: config
+            .midi_port_to_fl
+            .clone()
+            .unwrap_or_else(|| "FLStudioMCP RX".into()),
+        port_from_fl: config
+            .midi_port_from_fl
+            .clone()
+            .unwrap_or_else(|| "FLStudioMCP TX".into()),
+        client_name: config.midi_client_name.clone(),
+        default_timeout: std::time::Duration::from_secs(5),
+        wait_for_first_heartbeat: false, // lo hacemos nosotros abajo
+    };
+    let bridge = FlBridge::connect(bridge_config)
+        .map_err(|e| HereticError::Other(format!("abriendo MIDI bridge: {e}")))?;
+
+    if config.wait_for_heartbeat {
+        tracing::info!("esperando primer heartbeat del controller script...");
+        bridge
+            .wait_ready()
+            .await
+            .map_err(|e| HereticError::Other(format!("FL no responde: {e}")))?;
+        tracing::info!("FL alive — heartbeat recibido");
+    }
+
+    let transport = Arc::new(Transport::new(bridge));
+
+    // 2. Bind Named Pipe
     let mut server = ServerOptions::new()
         .create(&config.pipe_name)
         .map_err(|e| HereticError::Other(format!("create named pipe {}: {e}", config.pipe_name)))?;
     tracing::info!("Named Pipe server bound: {}", config.pipe_name);
 
-    // Loop de accept
+    // 3. Accept loop
     loop {
         if let Err(e) = server.connect().await {
             tracing::error!("accept error: {e}");
             return Err(HereticError::Io(e));
         }
         // Tras connect(), el MISMO server queda listo para I/O.
-        // Lo movemos al task del cliente. Creamos uno nuevo para aceptar el siguiente.
         let client = server;
         server = ServerOptions::new()
             .create(&config.pipe_name)
             .map_err(|e| HereticError::Other(format!("recreate named pipe: {e}")))?;
         let verifier = Arc::new(AuthVerifier::new(token.clone()));
         let audit = audit.clone();
+        let transport = transport.clone();
         tokio::spawn(async move {
-            if let Err(e) = handle_client(client, verifier, audit).await {
+            if let Err(e) = handle_client(client, verifier, audit, transport).await {
                 tracing::warn!("client disconnected: {e}");
             }
         });
@@ -148,7 +185,7 @@ async fn serve(
     _audit: Arc<AuditLog>,
 ) -> Result<(), HereticError> {
     Err(HereticError::Other(
-        "daemon solo soporta Windows (Named Pipes)".into(),
+        "daemon solo soporta Windows (Named Pipes + MIDI)".into(),
     ))
 }
 
@@ -157,6 +194,7 @@ async fn handle_client(
     client: NamedPipeServer,
     verifier: Arc<AuthVerifier>,
     audit: Arc<AuditLog>,
+    transport: Arc<Transport>,
 ) -> Result<(), HereticError> {
     let (read_half, mut write_half) = tokio::io::split(client);
     let mut reader = BufReader::new(read_half);
@@ -176,7 +214,7 @@ async fn handle_client(
     if n == 0 {
         return Err(HereticError::Other("client disconnected before auth".into()));
     }
-    let auth_envelope: serde_json::Value = serde_json::from_str(line.trim())?;
+    let auth_envelope: Value = serde_json::from_str(line.trim())?;
     let auth_resp: AuthResponse = serde_json::from_value(
         auth_envelope.get("data")
             .ok_or_else(|| HereticError::AuthFailed("missing data field".into()))?
@@ -200,7 +238,6 @@ async fn handle_client(
         if trimmed.is_empty() {
             continue;
         }
-        // Parsear request
         let request: Request = match serde_json::from_str(trimmed) {
             Ok(r) => r,
             Err(e) => {
@@ -210,16 +247,15 @@ async fn handle_client(
             }
         };
 
-        // Dispatch
+        // Dispatch (daemon-level o transport)
         let started = std::time::Instant::now();
-        let response = dispatch(&request, &verifier).await;
+        let response = dispatch(&request, &transport).await;
         let duration_ms = started.elapsed().as_millis() as u64;
 
         // Audit log
         let status = match &response.outcome {
             heretic_core::protocol::Outcome::Success { .. } => AuditStatus::Ok,
             heretic_core::protocol::Outcome::Error { error } => {
-                // Auth errors → Denied. Otros → Error.
                 if error.code == -32001 || error.code == -32002 {
                     AuditStatus::Denied
                 } else {
@@ -238,7 +274,6 @@ async fn handle_client(
             tracing::warn!("audit append failed: {e}");
         }
 
-        // Enviar response
         send_response(&mut write_half, &response).await?;
     }
 }
@@ -253,32 +288,12 @@ async fn send_response<W: tokio::io::AsyncWrite + Unpin>(
     Ok(())
 }
 
-/// Dispatch un Request a su handler. Por ahora solo `ping` y `health`.
-async fn dispatch(req: &Request, _verifier: &AuthVerifier) -> Response {
-    match req.tool_name() {
-        "ping" => Response::ok(
-            req.id.clone(),
-            json!({
-                "pong": true,
-                "protocol_version": heretic_core::PROTOCOL_VERSION,
-                "crate_version": heretic_core::CRATE_VERSION,
-            }),
-        ),
-        "health" => Response::ok(
-            req.id.clone(),
-            json!({
-                "alive": true,
-                "daemon_pid": std::process::id(),
-                "uptime_s": 0, // TODO: tracking real
-            }),
-        ),
-        other => Response::err(
-            req.id.clone(),
-            heretic_core::protocol::ProtocolError {
-                code: -32601,
-                message: format!("Method not found: {other}"),
-                data: None,
-            },
-        ),
+/// Dispatch un Request al handler apropiado. Primero intenta transport; si no
+/// es un método transport, usa el fallback del daemon (`ping`/`health`).
+async fn dispatch(req: &Request, transport: &Transport) -> Response {
+    // Intentar transport primero (cubre todos los métodos MIDI)
+    match transport.dispatch(req.tool_name(), req.params_or_empty()).await {
+        Ok(data) => Response::ok(req.id.clone(), data),
+        Err(e) => Response::from_heretic(&req.id, &e),
     }
 }
