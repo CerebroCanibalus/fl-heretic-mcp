@@ -1,0 +1,24 @@
+{
+    "Name": "FL Heretic Bridge",
+    "Vendor": "FL Heretic MCP",
+    "Version": "@PROJECT_VERSION@",
+    "URL": "https://github.com/CerebroCanibalus/fl-heretic-mcp",
+    "Class": "Heretic Bridge",
+    "Subcategories": [
+        "Fx",
+        "Instrument",
+        "Network"
+    ],
+    "Description": "Bridge between FL Studio and FL Heretic MCP daemon. Exposes FL API via TCP JSON-RPC on 127.0.0.1:9790.",
+    "Platforms": {
+        "Win64": true,
+        "MacOS": true,
+        "Linux": true
+    },
+    "Version Flags": {
+        "HasBundleIdentifier": false,
+        "Has64BitInteger": true,
+        "HasFloat32": true,
+        "HasFloat64": true
+    }
+}
