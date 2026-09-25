@@ -1,0 +1,58 @@
+# Rust build output
+/target
+**/target/
+**/*.rs.bk
+**/*.pdb
+
+# Cargo
+Cargo.lock.bak
+.cargo/
+
+# IDE
+/.vscode/
+/.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Logs (runtime data, no commit)
+/*.log
+**/*.log
+
+# Audit log SQLite (runtime data, no commit)
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+audit/
+logs/
+
+# Tokens / secrets (NUNCA)
+/*.token
+*.secret
+.env
+.env.*
+token
+*.key
+
+# FlojoStudio runtime data (lo crea el daemon en %LOCALAPPDATA%)
+# Los configs del repo sí se commitean
+
+# -----------------------------------------------------------------------------
+# Legacy Python code (en legacy/) — se preserva el .gitignore original
+# pero NO aplicamos reglas Python al código nuevo
+# -----------------------------------------------------------------------------
+legacy/.venv/
+legacy/__pycache__/
+legacy/**/__pycache__/
+legacy/.pytest_cache/
+legacy/.coverage
+legacy/htmlcov/
+legacy/*.egg-info/
+legacy/build/
+legacy/dist/
