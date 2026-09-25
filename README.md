@@ -1,209 +1,184 @@
-# flstudio-mcp
+# FL Heretic MCP
 
-**Control FL Studio with Claude: AI mixing, composition, and mix diagnosis through natural language.**
+> **Daemon blindado + MCP server para FL Studio sobre FlojoMCP.**
+> *Daemons blindados para un DAW amurallado.*
 
-![version](https://img.shields.io/badge/version-1.0.0-blue)
-![status](https://img.shields.io/badge/status-beta-yellow)
-![license](https://img.shields.io/badge/license-MIT-green)
-![python](https://img.shields.io/badge/python-3.10+-blue)
-![platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS-blue)
-![FL Studio](https://img.shields.io/badge/FL%20Studio-2025%2B-orange)
+[![version](https://img.shields.io/badge/version-0.1.0--alpha-orange)](https://github.com/CerebroCanibalus/fl-heretic-mcp)
+[![license](https://img.shields.io/badge/license-GPL--3.0-blue)](LICENSE)
+[![rust](https://img.shields.io/badge/rust-2024-orange)](https://www.rust-lang.org)
+[![platform](https://img.shields.io/badge/platform-Windows%2010%2F11-blue)](https://github.com/CerebroCanibalus/fl-heretic-mcp)
 
-![Claude diagnosing and fixing a mix in FL Studio](docs/demo.gif)
+![FL Heretic MCP architecture](docs/architecture.png)
 
-*Claude diagnosing and fixing a mix in FL Studio through natural language.*
+---
 
-## Overview
+## ¿Qué es esto?
 
-flstudio-mcp is a Model Context Protocol (MCP) server that lets Claude Desktop drive FL Studio 2025 directly — the mixer, plugins, piano roll, routing, and project — from plain-language requests. Ask for a mix diagnosis, a vocal chain, a chord progression in a particular scale, or a full arrangement, and Claude carries it out through FL's scripting API and a set of calibrated, safety-checked tools.
+FL Heretic MCP es la reescritura en Rust del [FLStudioMCP](legacy/) original (Python + FastMCP + MIDI SysEx). El proyecto original tenía una arquitectura ingeniosa pero cargaba con 4 problemas estructurales que lo condenaban a ser un parche sobre parche:
 
-It is genre- and producer-agnostic: nothing about it assumes a particular style of music.
+1. **Detección de plugins primitiva** → solo lo que FL reporta en runtime, sin índice de librería.
+2. **Detección de proyectos primitiva** → 7 campos. Sin parse del `.flp`. Sin samples.
+3. **Transporte MIDI SysEx con techo de 1.5KB** → paginación obligatoria de TODO.
+4. **Runtime Python pesado** → 50-76MB RAM, GIL, deploy con venv + native deps.
+
+FL Heretic MCP ataca los 4 con un diseño en 3 capas, escrito en Rust sobre el framework [FlojoMCP](https://github.com/CerebroCanibalus/FlojoMCP):
+
+```
+[MCP server stdio]  ←FlojoMCP→  [Daemon blindado Named Pipe]  ←MIDI+parse→  [FL Studio]
+     Rust 7MB              Rust mismo binary           FL Python sandbox + .flp
+```
+
+El daemon es el único proceso autorizado a tocar FL Studio. Autentica cada request del agente, rate-limitea, audita, supervisa FL con watchdog, cachea el proyecto en SQLite, y maneja reconexión tras crashes sin que el MCP server se entere.
+
+## Estado actual
+
+**Fase 0+1** (esta iteración): workspace Cargo + daemon básico con auth HMAC + audit log SQLite + Named Pipe server + comando `ping`.
+
+Ver [`AGENTS.md`](AGENTS.md) §6 para el plan de fases completo.
 
 ## Quickstart
 
-```bat
-scripts\install_windows.bat        :: controller + server + note bridge
-fl-studio-mcp-daemon               :: start the bridge, keep it running
+```powershell
+# Clonar
+git clone https://github.com/CerebroCanibalus/fl-heretic-mcp
+cd fl-heretic-mcp
+
+# Build
+cargo build --release
+
+# Generar token + iniciar daemon
+target\release\fl-heretic.exe token generate
+target\release\fl-heretic.exe daemon
+
+# Probar conexión
+cargo run -p ping
 ```
 
-```bash
-./scripts/install_macos.sh         # macOS: controller + server + note bridge
-fl-studio-mcp-daemon               # start the bridge, keep it running
+## Arquitectura
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│ OpenCode / Claude (MCP client stdio NDJSON)                  │
+└────────────────┬─────────────────────────────────────────────┘
+                 │
+┌────────────────▼─────────────────────────────────────────────┐
+│ fl-heretic mcp (FlojoMCP, Rust)                              │
+│   • Tool registry + schema validation                        │
+│   • Bearer token al handshake                                │
+│   • Reenvía comandos al daemon via Named Pipe                │
+└────────────────┬─────────────────────────────────────────────┘
+                 │ Named Pipe \\.\pipe\fl-heretic-<pid>
+                 │ JSON-RPC 2.0 NDJSON + Bearer HMAC
+┌────────────────▼─────────────────────────────────────────────┐
+│ fl-heretic daemon (Rust, hardened)                           │
+│   ┌─────────────────────────────────────────────────────┐   │
+│   │ Security & control                                  │   │
+│   │   • HMAC Bearer auth │   │
+│   │   • Rate limit por tool (governor)                  │   │
+│   │   • Audit log SQLite WAL append-only                │   │
+│   │   • Capability ACL │   │
+│   │   • Circuit breaker (heartbeat)                     │   │
+│   └─────────────────────────────────────────────────────┘   │
+│   ┌─────────────────────────────────────────────────────┐   │
+│   │ State & cache                                       │   │
+│   │   • Project snapshot (typed, versioned)             │   │
+│   │   • Plugin library index (SQLite, persisted)        │   │
+│   │   • .flp file watch (notify changes)                │   │
+│   │   • Calibration cache (fingerprint → curves)        │   │
+│   │   • Session manager (per-project)                          │   │
+│   └─────────────────────────────────────────────────────┘   │
+│   ┌─────────────────────────────────────────────────────┐   │
+│   │ Transport to FL                                     │   │
+│   │   • MIDI SysEx (primary hoy)                        │   │
+│   │   • .pyscript file-watch bridge (heavy writes)      │   │
+│   │   • .flp direct read (no FL touch)                  │   │
+│   │   • VST3 FlojoBridge (FUTURO Phase 6)               │   │
+│   └─────────────────────────────────────────────────────┘   │
+│   ┌─────────────────────────────────────────────────────┐   │
+│   │ Watchdog                                            │   │
+│   │   • FL alive (heartbeat 500ms)                      │   │
+│   │   • .pyscript armed (re-arm if lost)               │   │
+│   │   • Disk space, port conflicts                      │   │
+│   │   • Auto-restart on crash                           │   │
+│   └─────────────────────────────────────────────────────┘   │
+└────────────────┬─────────────────────────────────────────────┘
+                 │ MIDI loopback / .pyscript / .flp
+┌────────────────▼─────────────────────────────────────────────┐
+│ FL Studio 25 (controller + .pyscript + .flp)                 │
+└──────────────────────────────────────────────────────────────┘
 ```
 
-Wire the two virtual MIDI ports in FL (loopMIDI on Windows, IAC Driver on
-macOS), arm `MCP_Apply` once in the piano roll, then ask Claude in plain
-language:
+## Estructura
 
-> "Scan my mix and tell me what's wrong." — "Set up a vocal chain from my plugins." — "Export this arrangement to MIDI."
+```
+FLHereticMCP/
+├── Cargo.toml                  # workspace
+├── AGENTS.md                   # memoria viva (leer primero)
+├── AUDIT.md                    # auditoría del FLStudioMCP original
+├── README.md                   # este archivo
+├── LICENSE                     # GPL-3.0
+├── .gitignore                  # Rust + secrets
+├── crates/
+│   ├── heretic-core/           # tipos compartidos, error, auth, audit, protocol
+│   └── heretic-daemon/         # el daemon blindado
+├── examples/
+│   └── ping/                   # cliente mínimo
+├── scripts/                    # installer PowerShell (próximamente)
+├── docs/                       # hallazgos del FLStudioMCP original (referencia)
+└── legacy/                     # código Python preservado (no se desarrolla)
+```
 
-Full setup is below.
+## Roadmap
 
-## Capabilities
+| Fase | Estado | Descripción |
+|---|---|---|
+| 0 — Setup | ✅ done | Auditoría, rename, workspace |
+| 1 — Daemon básico | 🚧 en curso | Named Pipe + HMAC + audit + `ping` |
+| 2 — Bridge MIDI | ⏳ | Controller script port + transport tools |
+| 3 — Port completo | ⏳ | 67 tools del FLStudioMCP re-implementados |
+| 4 — Features nuevas | ⏳ | Plugin indexer, .flp parser, Mix Doctor paralelo |
+| 5 — Maduración | ⏳ | Rate limit, ACL, watchdog, prompts, docs |
+| 6 — VST3 FlojoBridge | ⏳ futuro | Game changer: WebSocket sin cap de payload |
 
-### Mixing & diagnosis
-- **Mix Doctor** — scans the whole mix and reports concrete problems (clipping, low headroom, level imbalance, missing high-pass, ungrouped related tracks, overlapping EQ boosts), each with the exact evidence and a proposed fix. Fixes are applied one at a time, only on approval, through a snapshot → write → readback → rollback safety layer. Master clipping is resolved by trimming the contributing source tracks rather than pulling the master.
-- **Full-song peak watch** — holds a running peak per track across playback, so level decisions are based on the loudest moment of the actual song, not a single instant.
-- **Calibrated processing intents** — musical EQ, compression, reverb, and delay moves mapped to real plugin parameters (native and third-party), each applied as one reversible change.
-- **Level-aware compression** — sets thresholds relative to a track's measured level during playback.
-- **Gain staging** — proposes per-track trims toward a healthy level with proper master headroom.
-- **Reference match** — compares your mix's level and tonal balance against a reference track.
-- **Bulk track control** — solo or mute a whole group (drums, vocals, …) in one step, with a one-call reset.
-- **Track & channel coloring** — color a track, a channel, or a whole group (drums, vocals, …) by color name or hex, reversible like every other change.
+Ver `AGENTS.md` §6 para el detalle de cada fase.
 
-### Plugin & preset control
-- Read and set plugin parameters by name, on native and third-party plugins (the parameter list is resolved live).
-- **Chain suggestions** and **preset recommendations** drawn from your actual installed library — read directly from FL's plugin database and preset folders on disk, so recommendations are limited to what you own.
+## Stack
 
-### Composition
-- **Multi-track MIDI export** — generate a complete arrangement as a standard MIDI file to import.
-- **Multi-pattern arrangement** — create, name, clone, and mark sections.
-- **Note and chord writing** into the piano roll, with quantize to a grid (for new notes and existing ones).
-- **Composition in any scale or mode** — Western modes, pentatonic, ragas, maqam, and beyond — through the scale composer, where Claude supplies the notes for the requested scale.
+- **Rust 2024** + **Cargo workspace**
+- [FlojoMCP](https://github.com/CerebroCanibalus/FlojoMCP) — framework MCP (path dep)
+- [tokio](https://tokio.rs) — async runtime
+- [rusqlite](https://github.com/rusqlite/rusqlite) — audit log SQLite
+- [hmac](https://github.com/RustCrypto/MACs) + [sha2](https://github.com/RustCrypto/hashes) — Bearer tokens
+- [clap](https://github.com/clap-rs/clap) — CLI subcommands
+- [tracing](https://github.com/tokio-rs/tracing) — observabilidad
+- (Fase 2) [midir](https://github.com/Boddlnagg/midir) — MIDI bridge
 
-### Audio analysis
-- Tempo and key estimation from an audio file.
-- Melody-to-MIDI transcription (CREPE pitch tracking, with a lighter fallback).
+## Seguridad
 
-The server exposes 67 tools across 14 categories, plus 6 live resources (project, mixer, transport, channels, patterns, status) that Claude can read directly.
+El daemon implementa blindaje PRO:
 
-## What sets it apart
+- **Auth HMAC-SHA256 Bearer** — token generado al `init`, guardado con ACL Windows. Cada request firma el payload.
+- **Rate limit por tool** (token bucket) — configurable por tool.
+- **Audit log append-only** — SQLite WAL con triggers que bloquean UPDATE/DELETE. Retention 30 días.
+- **Capability ACL** — lista de tools permitidas. Modos `safe` / `demo` / `readonly`.
+- **Circuit breaker** — si FL se congela 3s, el daemon deja de enviar comandos.
+- **Watchdog tokio** — supervisa FL alive, .pyscript armed, port conflicts.
 
-flstudio-mcp is built as a mixing and production assistant, not only a note sender. It diagnoses and repairs a whole mix, makes decisions from real measured levels rather than guesswork, and is aware of your actual plugin and preset library when it makes suggestions. Every change that touches the project is shown before it is applied, logged, and reversible.
+## Documentación
 
-## Limitations
+- [`AGENTS.md`](AGENTS.md) — memoria viva del proyecto (decisiones, bugs, próximos pasos)
+- [`AUDIT.md`](AUDIT.md) — auditoría brutal del FLStudioMCP original
+- [`docs/`](docs/) — hallazgos críticos del comportamiento de FL (referencia histórica)
+- [`legacy/`](legacy/) — código Python preservado, no se desarrolla
 
-These are properties of FL Studio's scripting API, stated plainly:
+## Licencia
 
-- **Plugins, audio files, and rendering are UI-only.** FL's API cannot load a plugin, load an audio file, or render audio. The plugin and preset tools therefore *suggest* — you load the chosen plugin or preset, and Claude then configures it. Audio export is done manually (File > Export); Claude can analyze the rendered file afterward.
-- **Note writing is armed once per session.** A generated pyscript writes notes into the piano roll; FL exposes no API to run a pyscript, so you run "MCP_Apply" once from the piano roll's scripting menu at the start of a session.
-- **Micro-tonal and gamaka-heavy music is approximated.** Scales with intervals smaller than a semitone (e.g. Arabic maqam) are rounded to the nearest semitone, and traditions built on gamaka/ornamentation (e.g. Carnatic) get the *scale framework* — the correct swaras and intervals — not gamaka or micro-tonal rendering. That's a limit of 12-tone MIDI, not of the tools.
+GPL-3.0-or-later — ver [`LICENSE`](LICENSE).
 
-## Requirements
+## Contribuir
 
-- **Windows 10/11** (tested on Windows 11) or **macOS**
-- **FL Studio 2025** or newer
-- **Claude Desktop** (or any MCP client)
-- **Python 3.10+**
-- Virtual MIDI ports:
-  - Windows: **loopMIDI** ([download](https://www.tobias-erichsen.de/software/loopmidi.html))
-  - macOS: the built-in **IAC Driver**
-- Optional: **ffmpeg** on PATH (for MP3 analysis)
+Ver [`CONTRIBUTING.md`](CONTRIBUTING.md) (legacy, aún no actualizado al nuevo propósito).
 
-Linux is not yet supported — contributions welcome.
+---
 
-## Setup
-
-1. **Create two virtual MIDI ports**, named exactly `FLStudioMCP RX` and
-   `FLStudioMCP TX`.
-
-   Windows: create both ports in loopMIDI.
-
-   macOS:
-   - Open **Audio MIDI Setup**.
-   - Choose **Window > Show MIDI Studio**.
-   - Double-click **IAC Driver**.
-   - Enable **Device is online**.
-   - Create or rename two ports exactly:
-     - `FLStudioMCP RX`
-     - `FLStudioMCP TX`
-
-2. **Install the controller script and server:**
-
-   Windows:
-   ```bat
-   git clone https://github.com/rosasynthesiz/flstudio-mcp
-   cd flstudio-mcp
-   scripts\install_windows.bat
-   ```
-
-   macOS:
-   ```bash
-   git clone https://github.com/rosasynthesiz/flstudio-mcp
-   cd flstudio-mcp
-   chmod +x scripts/install_macos.sh
-   ./scripts/install_macos.sh
-   ```
-
-   This copies the controller script, seeds the note-bridge pyscript
-   (`MCP_Apply`), installs the server, and checks that your virtual MIDI ports
-   exist. For audio features, add the optional extras:
-   ```
-   pip install -e ".[audio]"
-   pip install -e ".[audio,audio-accurate]"
-   ```
-
-3. **Configure FL Studio** — Options > MIDI Settings:
-   - Enable `FLStudioMCP RX` as an **input**, set its controller type to **FLStudioMCP**, and give it a port number.
-   - Enable `FLStudioMCP TX` as an **output** with the **same** port number.
-   - View > Script output should show `[FLStudioMCP] Ready`.
-
-4. **Start the bridge daemon** (recommended) so the MIDI port is held by a stable process:
-   ```bat
-   fl-studio-mcp-daemon
-   ```
-
-5. **Register the server with Claude Desktop**:
-
-   Windows: `%APPDATA%\Claude\claude_desktop_config.json`
-
-   macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`
-
-   ```json
-   {
-     "mcpServers": {
-       "fl-studio": {
-         "command": "fl-studio-mcp",
-         "env": { "FLSTUDIO_MCP_TRANSPORT": "tcp" }
-       }
-     }
-   }
-   ```
-   `tcp` routes through the daemon, which works regardless of how Claude Desktop launches the server. Omit the env var to let the server open the MIDI ports directly instead.
-
-6. **Arm the note bridge (per session)** — open the piano roll and run **MCP_Apply** once from its scripting menu, so note-writing works.
-
-   On macOS, the note bridge re-triggers the armed script with `Cmd+Opt+Y`.
-   Grant Accessibility permission to the app running the MCP server or daemon,
-   for example Terminal, iTerm, Claude Desktop, or Cursor:
-   **System Settings > Privacy & Security > Accessibility**.
-
-Verify the connection by asking Claude to call `fl_ping`.
-
-## Troubleshooting
-
-| Symptom | Fix |
-|---|---|
-| Virtual MIDI ports not found / not detected | The two ports must be named **exactly** `FLStudioMCP RX` and `FLStudioMCP TX`. Recreate them in loopMIDI (Windows) or IAC Driver (macOS), then re-run the installer. |
-| No `[FLStudioMCP] Ready` in FL's Script output | The controller isn't registered: set the `FLStudioMCP RX` input's **Controller type** to **FLStudioMCP** in MIDI Settings, confirm `device_FLStudioMCP.py` is in `Settings\Hardware\FLStudioMCP\`, then fully restart FL Studio. |
-| Claude can't reach FL / `fl_ping` fails | Make sure the daemon is running (`fl-studio-mcp-daemon`); check the transport matches (`FLSTUDIO_MCP_TRANSPORT=tcp` uses the daemon, unset uses direct MIDI); restart Claude Desktop after editing its config. |
-| Note-writing does nothing | Run `MCP_Apply` once from the piano roll's scripting menu this session — it arms the note bridge. |
-| macOS note-trigger fails | Grant Accessibility permission to the app running the MCP server or daemon, then click the FL Piano roll and try `Cmd+Opt+Y`. |
-| Audio tools error or are unavailable | Install the optional extras: `pip install -e ".[audio]"` (or `".[audio,audio-accurate]"`). |
-
-## Usage examples
-
-Plain-language prompts:
-
-- "Scan my mix and tell me what's wrong."
-- "Set up a vocal chain on the lead vocal using my plugins."
-- "Suggest a vintage bass preset from my Serum library."
-- "Compose an 8-bar melody in D Dorian and write it to the selected channel."
-- "Export this arrangement to a MIDI file."
-- "What tempo and key is this track?" (on an audio file)
-
-## Architecture
-
-A thin controller script runs inside FL Studio and returns only cheap, raw data; all judgement — diagnosis, calibration, planning — happens server-side. A standalone daemon owns the MIDI port so the server works regardless of how the MCP client is launched. Note authoring uses a generated pyscript bridge: the daemon re-triggers the armed `MCP_Apply` script with the platform run-last-script shortcut after a brief window force-focus. Every project-modifying tool routes through a snapshot → write → readback → rollback safety layer backed by a persisted change log.
-
-Design notes and findings are in [`docs/`](docs/).
-
-## License
-
-MIT — see [LICENSE](LICENSE).
-
-## Status & contributing
-
-Beta — the public 1.0 release. Windows and macOS are supported; Linux contributions are welcome. Issues and pull requests: [github.com/rosasynthesiz/flstudio-mcp](https://github.com/rosasynthesiz/flstudio-mcp).
-
-<!-- mcp-name: io.github.rosasynthesiz/flstudio-mcp -->
+> *Daemons blindados para un DAW amurallado.*

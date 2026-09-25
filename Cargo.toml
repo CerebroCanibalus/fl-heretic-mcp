@@ -1,0 +1,70 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/heretic-core",
+    "crates/heretic-daemon",
+    "examples/ping",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+authors = ["General Beria"]
+license = "GPL-3.0-or-later"
+rust-version = "1.85"
+description = "Daemon blindado + MCP server para FL Studio sobre FlojoMCP"
+repository = "https://github.com/CerebroCanibalus/fl-heretic-mcp"
+
+# ---------------------------------------------------------------------------
+# Path deps — FLHereticMCP vive junto a FlojoMCP
+# ---------------------------------------------------------------------------
+# (las deps path van en [workspace.dependencies] abajo)
+
+[workspace.dependencies]
+# FlojoMCP + macros (con features para auth, rate-limit, session)
+flojo-mcp       = { path = "../FlojoMCP/crates/flojo-mcp", features = ["http", "rate-limit", "session"] }
+flojo-macros    = { path = "../FlojoMCP/crates/flojo-macros" }
+
+# Async runtime
+tokio           = { version = "1", features = ["full"] }
+tokio-util      = "0.7"
+async-trait     = "0.1"
+futures         = "0.3"
+
+# Serialización + schemas
+serde           = { version = "1", features = ["derive"] }
+serde_json      = "1"
+schemars        = "0.8"
+
+# Errores + logs
+thiserror       = "1"
+anyhow          = "1"
+tracing         = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+
+# Criptografía (HMAC-SHA256 para Bearer tokens)
+hmac            = "0.12"
+sha2            = "0.10"
+base64          = "0.22"
+rand            = "0.8"
+hex             = "0.4"
+subtle          = "2.6"        # constant-time comparison
+
+# Persistencia
+rusqlite        = { version = "0.31", features = ["bundled"] }
+
+# CLI
+clap            = { version = "4", features = ["derive", "env"] }
+
+# NOTA: las dependencias target-specific van en cada crate, no aquí
+# (un virtual manifest no permite secciones [target.*])
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
+
+[profile.dev]
+opt-level = 0
+debug = 1

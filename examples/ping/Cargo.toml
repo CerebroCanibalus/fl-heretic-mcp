@@ -1,0 +1,25 @@
+[package]
+name        = "ping"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Cliente mínimo que conecta al daemon via Named Pipe y ejecuta `ping`"
+publish = false
+
+[[bin]]
+name = "ping"
+path = "src/main.rs"
+
+[dependencies]
+heretic-core       = { path = "../../crates/heretic-core" }
+
+tokio              = { workspace = true }
+serde              = { workspace = true }
+serde_json         = { workspace = true }
+anyhow             = { workspace = true }
+tracing            = { workspace = true }
+
+# Windows: Named Pipes
+[target.'cfg(windows)'.dependencies]
+tokio = { workspace = true }
