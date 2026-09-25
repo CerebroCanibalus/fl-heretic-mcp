@@ -14,7 +14,7 @@
 //! |------------|---------------------------|-----
 //! | `open`     | `CreateProcess` con el .flp| abre en la instancia existente si ya hay una
 //! | `save`     | bridge `project.save`     | `FPT_Save`, el atajo Ctrl+S
-//! | `save_as`  | bridge `project.saveAs`   | `FPT_SaveNew`, abre dialogo
+//! | `create`   | copiar .flp + CreateProcess | ruta arbitraria sin pelear con la UI
 //! | `close`    | `WM_CLOSE` a la ventana   | FL pregunta por los cambios
 //! | `status`   | `tasklist` + ping         | proceso y bridge
 //!
@@ -52,7 +52,7 @@ impl Lifecycle {
         match method {
             "open" => self.open(params).await,
             "save" => self.save().await,
-            "save_as" => self.save_as().await,
+            "create_project" => self.create_project(params).await,
             "close" => self.close(params).await,
             "status" => self.status().await,
             "wait_ready" => self.wait_ready(params).await,
@@ -118,16 +118,68 @@ impl Lifecycle {
         }))
     }
 
-    /// Guardar como. Abre un dialogo de FL: la ruta la pone el usuario.
-    pub async fn save_as(&self) -> Result<Value> {
-        let r = self.bridge.call("project.saveAs", json!({})).await?;
-        Ok(json!({
-            "saved": false,
-            "warning": r
-                .get("warning")
-                .and_then(Value::as_str)
-                .unwrap_or("FL abre un dialogo 'Save as'; la ruta la escribe el usuario"),
-        }))
+    /// Crea un proyecto NUEVO en la carpeta habitual y lo abre.
+    ///
+    /// Por que no se usa el dialogo de "Save as" de FL: la FL Python API no
+    /// expone la API de proyecto (`dir(general)` no tiene `saveProject` ni
+    /// `getProjectFilePath`) y de las 79 constantes `midi.FPT_*` no hay ninguna
+    /// que guarde con ruta. `FPT_SaveNew` abre el dialogo la primera vez,
+    /// pero sus campos son `TQuickEdit` (controles Delphi internos) y al
+    /// confirmar el dialogo se cierra SIN guardar. Intentar inyectar la ruta
+    /// por `WM_SETTEXT` no funciona de forma fiable.
+    ///
+    /// Un `.flp` es un fichero: la via determinista es copiar una plantilla a
+    /// la ruta deseada y pedirle a FL que la abra con `CreateProcess`. Cero
+    /// interfaz, cero teclas, cero dialogos.
+    ///
+    /// Parametros:
+    /// - `name` (obligatorio): nombre del proyecto, sin extension.
+    /// - `dir` (opcional): carpeta destino. Defecto: la de FL.
+    /// - `template` (opcional): `.flp` base. Defecto: el mas reciente de la
+    ///   carpeta de FL que no sea backup ni autosave.
+    /// - `open` (opcional, def. true): abrirlo en FL despues de crearlo.
+    pub async fn create_project(&self, params: Value) -> Result<Value> {
+        let name = params
+            .get("name")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| {
+                HereticError::InvalidRequest("create_project: falta 'name'".into())
+            })?
+            .to_string();
+        let dir = params.get("dir").and_then(|v| v.as_str()).map(PathBuf::from);
+        let template = params
+            .get("template")
+            .and_then(|v| v.as_str())
+            .map(PathBuf::from);
+        let open = params.get("open").and_then(Value::as_bool).unwrap_or(true);
+
+        let dir_ref = dir.as_deref();
+        let tpl_ref = template.as_deref();
+        let path = heretic_fl::create_project_file(&name, dir_ref, tpl_ref)?;
+        let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+
+        let mut out = json!({
+            "created": path.display().to_string(),
+            "file_size": size,
+            "opened": false,
+        });
+
+        if open {
+            match heretic_fl::launch(Some(&path), 25) {
+                Ok(proc) => {
+                    out["opened"] = json!(true);
+                    out["pid"] = json!(proc.pid);
+                    // Da tiempo a que FL levante el bridge antes de devolver,
+                    // o el primer comando del LLM fallara por timeout.
+                    let _ = self.wait_ready(json!({ "timeout": 30 })).await;
+                    out["bridge_ready"] = json!(true);
+                }
+                Err(e) => {
+                    out["open_error"] = json!(e.to_string());
+                }
+            }
+        }
+        Ok(out)
     }
 
     /// Cierra FL Studio enviando `WM_CLOSE` a su ventana.

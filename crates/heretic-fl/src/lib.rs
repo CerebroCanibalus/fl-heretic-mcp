@@ -33,12 +33,14 @@ pub mod bridge;
 pub mod file_rpc;
 pub mod midi;
 pub mod process;
+pub mod newproj;
 
 pub use bridge::{
     default_script_dir, BridgeConfig, BridgeInfo, FlBridge, TransportStatus, ACTIONS,
 };
 pub use file_rpc::FileRpc;
 pub use process::{FlProcess, FlStatus, close, find_fl_exe, kill, launch, running_process, status};
+pub use newproj::{create as create_project_file, default_projects_dir, find_template};
 
 /// Versión de crate.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

@@ -204,3 +204,24 @@ pub async fn fl_project_info() -> std::result::Result<Value, ToolError> {
         .map_err(daemon_err)?;
     Ok(data)
 }
+
+#[tool(description = "Create a NEW FL Studio project in FL's projects folder and open it. Copies a template .flp to the destination and launches FL with it, which is fully automatic and needs no keyboard or dialogs. This is the reliable way to make a new project: FL's own Save As dialog cannot be automated because its fields are internal Delphi controls that close without saving. Template defaults to the most recent .flp in FL's projects folder that is not a backup.")]
+pub async fn fl_create_project(
+    name: String,
+    dir: String,
+    template: String,
+) -> std::result::Result<Value, ToolError> {
+    let client = daemon().await?;
+    let mut params = json!({ "name": name });
+    if !dir.is_empty() {
+        params["dir"] = json!(dir);
+    }
+    if !template.is_empty() {
+        params["template"] = json!(template);
+    }
+    let data = client
+        .call("create_project", params)
+        .await
+        .map_err(daemon_err)?;
+    Ok(data)
+}
