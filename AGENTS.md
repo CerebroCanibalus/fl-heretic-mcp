@@ -190,42 +190,43 @@ Crate futuro (no en Fase 0+1):
 
 ## 6. Plan de fases
 
-### Fase 0 — Setup ⏳ (esta sesión)
+### Fase 0 — Setup ✅ done
 - [x] Auditoría brutal del FLStudioMCP → `AUDIT.md`
-- [ ] Crear estructura de directorios (`FLHereticMCP/`)
-- [ ] `Cargo.toml` workspace con path deps a FlojoMCP
-- [ ] `.gitignore`, `LICENSE` (GPL-3.0), `README.md` inicial
-- [ ] `AGENTS.md` (este archivo)
-- [ ] Rename físico del directorio `FLStudioMCP` → `FLHereticMCP`
+- [x] Crear estructura de directorios (`FLHereticMCP/`)
+- [x] `Cargo.toml` workspace con path deps a FlojoMCP
+- [x] `.gitignore`, `LICENSE` (GPL-3.0), `README.md` inicial
+- [x] `AGENTS.md` (este archivo)
+- [x] Rename físico del directorio `FLStudioMCP` → `FLHereticMCP`
+- [x] Repo público: `https://github.com/CerebroCanibalus/fl-heretic-mcp`
 
-### Fase 1 — Daemon básico ✅ target
-- [ ] `heretic-core` con tipos compartidos
-  - [ ] `error.rs` — `HereticError` enum con `thiserror`
-  - [ ] `auth.rs` — HMAC Bearer + token store
-  - [ ] `audit.rs` — SQLite WAL append-only + retention
-  - [ ] `protocol.rs` — JSON-RPC envelope (request, response, error)
-- [ ] `heretic-daemon` con Named Pipe server
-  - [ ] `pipe.rs` — servidor Named Pipe Windows + auth handshake
-  - [ ] `commands.rs` — dispatch JSON-RPC con handlers tipados
-  - [ ] `watchdog.rs` — stub por ahora, implementación en Fase 5
-- [ ] Binario `fl-heretic` con subcommand dispatcher (clap)
-  - [ ] `fl-heretic mcp` — arranca MCP server (stub)
-  - [ ] `fl-heretic daemon` — arranca el daemon blindado
-  - [ ] `fl-heretic doctor` — diagnóstico
-  - [ ] `fl-heretic token generate|rotate|show`
-  - [ ] `fl-heretic init` — setup inicial (Fase 5)
-- [ ] Comando `ping` funcional via Named Pipe + audit
-- [ ] Tests con `FlojoTester`-style (sin Named Pipe, mock auth)
-- [ ] `examples/ping/` — cliente que conecta al daemon y manda `ping`
-- [ ] Compila, todos los tests pasan
+### Fase 1 — Daemon básico ✅ done
+- [x] `heretic-core` con tipos compartidos
+  - [x] `error.rs` — `HereticError` enum con `thiserror` (13 variantes, `From` para io/json/sqlite/poisoned)
+  - [x] `auth.rs` — HMAC Bearer + token store + AuthChallenge + AuthResponse + AuthVerifier (constant-time via `subtle`)
+  - [x] `audit.rs` — SQLite WAL append-only + retention via `rotate()` + triggers que bloquean UPDATE/DELETE
+  - [x] `protocol.rs` — JSON-RPC 2.0 envelope (Request, Response, Outcome, ProtocolError, códigos estándar + custom)
+- [x] `heretic-daemon` con Named Pipe server (Windows)
+  - [x] `pipe.rs` — Named Pipe server + handshake HMAC + dispatch JSON-RPC + audit per-request + handlers `ping`/`health`
+  - [x] `commands/mod.rs` + `doctor.rs` + `token.rs` — subcommands CLI
+- [x] Binario `fl-heretic` con subcommand dispatcher (clap)
+  - [x] `fl-heretic mcp` — STUB (implementación Fase 2)
+  - [x] `fl-heretic daemon` — arranca el daemon blindado
+  - [x] `fl-heretic doctor` — diagnóstico
+  - [x] `fl-heretic token generate|rotate|show|path`
+- [x] Comando `ping` funcional via Named Pipe + audit
+- [x] 19 tests unitarios en `heretic-core` (todos pasando)
+- [x] `examples/ping/` — cliente que conecta al daemon y ejecuta `ping`
+- [x] Compila (`cargo build --workspace` y `cargo build --release`)
+- [x] **Smoke test end-to-end verificado** (ver §7 changelog)
 
 ### Fase 2 — Bridge MIDI + tools transport
-- [ ] Port del controller script (`device_FLStudioMCP.py`) → handlers Rust
-- [ ] `heretic-fl` con `midi.rs` — MIDI SysEx bridge (mido-equivalent en Rust: `midir` crate)
-- [ ] Heartbeat detection (500ms)
+- [ ] Port del controller script (`legacy/.../device_FLStudioMCP.py`) → handlers Rust
+- [ ] Nuevo crate `heretic-fl` con `midi.rs` — MIDI SysEx bridge (crate `midir`)
+- [ ] Heartbeat detection (500ms desde `OnIdle` del controller script legacy)
 - [ ] Tools transport: `fl_ping`, `fl_get_tempo`, `fl_set_tempo`, `fl_play`, `fl_stop`, `fl_get_song_position`, `fl_set_song_position`
-- [ ] `heretic-mcp` — MCP server con FlojoMCP (path dep), reenvía al daemon via Named Pipe
-- [ ] End-to-end: Claude → MCP server → daemon → MIDI → FL → respuesta
+- [ ] Nuevo crate `heretic-mcp` — MCP server con FlojoMCP (path dep), reenvía al daemon via Named Pipe
+- [ ] End-to-end: Claude → MCP server (stdio) → daemon (Named Pipe) → MIDI → FL → respuesta
+- [ ] Portar el controller script Python actualizado a FL Studio (sync con `legacy/.../device_FLStudioMCP.py`)
 
 ### Fase 3 — Port completo de tools (drop-in replacement)
 - [ ] Port de las 67 tools del FLStudioMCP al MCP server Rust
@@ -261,12 +262,28 @@ Crate futuro (no en Fase 0+1):
 
 ## 7. Estado actual (changelog)
 
-### 2026-09-24 — Auditoría + decisiones
+### 2026-09-24/25 — Fase 0 + Fase 1 completas + primer push
 - ✅ Auditoría completa del FLStudioMCP → `AUDIT.md`
 - ✅ Decisión: daemon blindado en Rust, mismo repo, Named Pipes, blindaje PRO
 - ✅ Decisión: nombre "FL Heretic MCP"
 - ✅ Decisión: Fase 0+1 primero (setup + daemon básico)
-- ⏳ Creando estructura de directorios + Cargo workspace
+- ✅ Rename físico `FLStudioMCP/` → `FLHereticMCP/`
+- ✅ Código Python legacy movido a `legacy/`
+- ✅ Repo público en GitHub: `https://github.com/CerebroCanibalus/fl-heretic-mcp` (cuenta `CerebroCanibalus`)
+- ✅ Workspace Cargo con path deps a `FlojoMCP/crates/flojo-mcp` + `FlojoMCP/crates/flojo-macros` (features: http, rate-limit, session)
+- ✅ Crate `heretic-core`: error tipado, HMAC auth, audit log SQLite WAL append-only, JSON-RPC protocol
+- ✅ Crate `heretic-daemon`: binario `fl-heretic.exe` con subcommands `daemon|mcp|doctor|token`
+- ✅ Named Pipe server funcional con handshake HMAC
+- ✅ Cliente ejemplo `ping` conecta, autentica, ejecuta `ping`, recibe respuesta
+- ✅ Audit log crea archivo SQLite en `%LOCALAPPDATA%\fl-heretic\audit.db`
+- ✅ 19/19 tests unitarios pasan
+- ✅ **Smoke test end-to-end verificado** (ver output en conversación)
+
+### Próximo (Fase 2)
+- Port del controller script legacy Python a Rust (`midir` crate)
+- Nuevo crate `heretic-fl` con bridge MIDI SysEx
+- Tools transport: `fl_ping`, `fl_get_tempo`, `fl_set_tempo`, `fl_play`, `fl_stop`, etc.
+- Nuevo crate `heretic-mcp` con FlojoMCP stdio
 
 ---
 
@@ -303,43 +320,46 @@ Crate futuro (no en Fase 0+1):
 
 ---
 
-## 10. Rename: FLStudioMCP → FLHereticMCP
+## 10. Rename: FLStudioMCP → FLHereticMCP ✅ done
 
-### Acción
-- Mover `D:\Mis Juegos\ClaudeMCPs\FLStudioMCP\` → `D:\Mis Juegos\ClaudeMCPs\FLHereticMCP\`
-- Actualizar referencias internas (pyproject.toml legacy → cargo.toml nuevo, README, etc.)
-- El historial git se preserva si es un repo git (verificar con `git log` antes)
-- El código Python legacy se mantiene como `legacy/` para referencia histórica
+### Acción ejecutada
+- ✅ Directorio renombrado: `D:\Mis Juegos\ClaudeMCPs\FLStudioMCP\` → `D:\Mis Juegos\ClaudeMCPs\FLHereticMCP\`
+- ✅ Backup del viejo en `D:\Mis Juegos\ClaudeMCPs\FLStudioMCP_OLD_BACKUP` (pendiente eliminar tras validar)
+- ✅ Código Python legacy movido a `FLHereticMCP/legacy/` (preservado, no se desarrolla)
+- ✅ Repo GitHub público creado: `https://github.com/CerebroCanibalus/fl-heretic-mcp`
+- ✅ Remote `origin` apunta al repo nuevo (sin upstream)
+- ✅ Initial commit: `59edad0 feat: initial commit as FL Heretic MCP`
+- ✅ Fase 1 commit: `64949be feat: Fase 0+1 — workspace Cargo + daemon blindado básico`
 
-### Estructura después del rename
+### Estructura actual
 ```
 FLHereticMCP/
-├── Cargo.toml                  # nuevo (workspace Rust)
-├── AGENTS.md                   # este archivo
-├── AUDIT.md                    # auditoría
-├── README.md                   # nuevo
+├── Cargo.toml                  # workspace
+├── Cargo.lock
+├── AGENTS.md                   # este archivo (memoria viva)
+├── AUDIT.md                    # auditoría brutal
+├── README.md                   # descripción + quickstart + arquitectura
 ├── LICENSE                     # GPL-3.0
-├── .gitignore                  # nuevo
-├── crates/                     # nuevo (Rust)
-├── examples/                   # nuevo (Rust)
-├── scripts/                    # nuevo (PowerShell)
-├── docs/                       # preservado del legacy
+├── .gitignore                  # Rust + secrets
+├── CONTRIBUTING.md             # legacy (pendiente actualizar)
+├── ROADMAP.md                  # legacy (pendiente actualizar)
+├── crates/
+│   ├── heretic-core/           # error, auth, audit, protocol ✅
+│   └── heretic-daemon/         # binario fl-heretic + Named Pipe server ✅
+├── examples/
+│   └── ping/                   # cliente mínimo ✅
+├── scripts/                    # pendiente: installer PowerShell
+├── docs/                       # preservado del legacy (referencia)
 │   ├── CHANGELOG.md            # histórico v0.1/v0.2
 │   ├── FIX_REPORT.md           # bugs del controller script
 │   ├── SERUM_PROBE_FINDING.md  # findings críticos
-│   ├── VST_PROBE_FINDING.md
-│   ├── ARRANGEMENT_FINDING.md
 │   └── ...
-└── legacy/                     # preservado (código Python legacy)
-    ├── pyproject.toml          # fl-studio-mcp (ya no se desarrolla)
-    ├── src/fl_studio_mcp/      # código Python
+└── legacy/                     # código Python preservado (no se desarrolla)
+    ├── pyproject.toml
+    ├── src/fl_studio_mcp/      # código Python completo
     ├── fl_controller/          # controller script .py
     └── ...
 ```
-
-### Decisión pendiente
-- [ ] Confirmar con General: ¿rename físico AHORA o primero terminar Fase 0+1 conceptual y rename después?
-- [ ] Si rename AHORA: ¿qué hago con el código Python legacy? (¿a `legacy/`? ¿lo borramos?)
 
 ---
 
