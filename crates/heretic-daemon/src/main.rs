@@ -12,6 +12,7 @@
 //! fl-heretic token generate         # crea token nuevo
 //! fl-heretic doctor                 # chequea entorno (puertos MIDI, FL alive, etc.)
 //! fl-heretic new-project "mi-cancion"       # crea proyecto nuevo y lo abre
+//! fl-heretic config template <ruta.flp>    # fija la plantilla de los nuevos
 //! ```
 
 use std::process::ExitCode;
@@ -41,6 +42,20 @@ struct Cli {
     log: Option<String>,
 }
 
+/// Subcomandos de `fl-heretic config`.
+#[derive(Debug, Subcommand)]
+enum ConfigCmd {
+    /// Fija el .flp con el que se crean los proyectos nuevos.
+    Template {
+        /// Ruta del .flp de plantilla.
+        path: String,
+    },
+    /// Muestra la configuracion actual.
+    Show,
+    /// Ruta del fichero de configuracion.
+    Path,
+}
+
 #[derive(Debug, Subcommand)]
 enum Cmd {
     /// Arranca el daemon blindado sobre Named Pipe.
@@ -62,6 +77,11 @@ enum Cmd {
     Mcp {
         #[arg(long)]
         daemon_pipe: Option<String>,
+    },
+    /// Config persistente del daemon (plantilla, carpetas).
+    Config {
+        #[command(subcommand)]
+        action: ConfigCmd,
     },
     /// Crea un proyecto nuevo en la carpeta de FL y lo abre.
     ///
@@ -123,6 +143,31 @@ fn main() -> ExitCode {
         Cmd::Mcp { daemon_pipe: _ } => {
             tracing::error!("`mcp` subcommand es STUB en Fase 1 — implementación en Fase 2");
             ExitCode::from(1)
+        }
+        Cmd::Config { action: ConfigCmd::Template { path } } => {
+            match heretic_fl::set_template(std::path::Path::new(&path)) {
+                Ok(cfg) => {
+                    println!("plantilla fijada: {}", path);
+                    println!("config guardada en: {}", heretic_fl::config_path().display());
+                    let _ = cfg;
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("config error: {e}");
+                    ExitCode::from(1)
+                }
+            }
+        }
+        Cmd::Config { action: ConfigCmd::Show } => {
+            let cfg = heretic_fl::load_config();
+            let v = serde_json::to_string_pretty(&cfg).unwrap_or_default();
+            println!("config: {}", heretic_fl::config_path().display());
+            println!("{v}");
+            ExitCode::SUCCESS
+        }
+        Cmd::Config { action: ConfigCmd::Path } => {
+            println!("{}", heretic_fl::config_path().display());
+            ExitCode::SUCCESS
         }
         Cmd::NewProject { name, dir, template, no_open } => {
             let dirp = dir.map(std::path::PathBuf::from);

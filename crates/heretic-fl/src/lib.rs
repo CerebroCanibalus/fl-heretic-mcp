@@ -40,7 +40,10 @@ pub use bridge::{
 };
 pub use file_rpc::FileRpc;
 pub use process::{FlProcess, FlStatus, close, find_fl_exe, kill, launch, running_process, status};
-pub use newproj::{create as create_project_file, default_projects_dir, find_template};
+pub use newproj::{
+    Config, config_path, create as create_project_file, data_dir, default_projects_dir,
+    find_template, load_config, save_config, set_template,
+};
 
 /// Versión de crate.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
