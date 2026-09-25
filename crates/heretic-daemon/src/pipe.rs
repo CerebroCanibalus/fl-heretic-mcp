@@ -134,7 +134,7 @@ async fn serve(
             .unwrap_or_else(|| "FLStudioMCP TX".into()),
         client_name: config.midi_client_name.clone(),
         default_timeout: std::time::Duration::from_secs(5),
-        wait_for_first_heartbeat: false, // lo hacemos nosotros abajo
+        wait_for_first_heartbeat: true,  // el bridge espera internamente (5s)
     };
     let bridge = FlBridge::connect(bridge_config)
         .map_err(|e| HereticError::Other(format!("abriendo MIDI bridge: {e}")))?;
