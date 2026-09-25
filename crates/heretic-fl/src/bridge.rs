@@ -1,98 +1,84 @@
-//! `FlBridge` — API de alto nivel sobre el bridge MIDI SysEx.
+//! Cliente TCP simple al VST3 plugin.
 //!
-//! Maneja la correlación request/response, el envío/recepción de mensajes,
-//! y expone métodos tipados para los tools del daemon.
+//! El plugin VST3 corre dentro de FL Studio y expone un servidor TCP en
+//! 127.0.0.1:9790 que actúa como PROXY TCP↔file-RPC al FL Heretic Bridge.
 //!
-//! ## Topología interna
+//! Este módulo es el cliente Rust que habla con el VST3 vía TCP JSON-RPC.
 //!
+//! Protocolo (idéntico al fLMCP Bridge):
+//! - Frame: [4 bytes BE u32 length][payload JSON]
+//! - Request:  {"id": int, "action": str, "params": {...}}
+//! - Response: {"id": int, "ok": bool, "result": ..., "error": str|None}
+//!
+//! Topología:
 //! ```text
-//! [tools del daemon]                       [este bridge]
-//!      │                                          │
-//!      │  call(cmd, params)                        │
-//!      │ ────────────────────────────────────────► │
-//!      │                                          ├─► genera request_id
-//!      │                                          ├─► encode SysEx
-//!      │                                          ├─► midi.send()
-//!      │                                          ├─► oneshot channel
-//!      │ ◄──── result ──────────────────────────  │
-//!      │                                          │  midi worker
-//!      │                                          │  (background thread)
-//!      │                                          │   ├─ incoming_rx.recv()
-//!      │                                          │   ├─ decode SysEx
-//!      │                                          │   ├─ match request_id
-//!      │                                          │   └─ oneshot.send(result)
+//! [daemon Rust] --TCP 127.0.0.1:9790--> [VST3 plugin] --file-RPC--> [FL Heretic Bridge] --FL API--> FL Studio
 //! ```
-//!
-//! El worker es un thread OS dedicado (no async) porque midir no es async-friendly.
-//! Los tools hablan con el bridge via mpsc + oneshot.
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use tokio::sync::{mpsc, oneshot};
-use tokio_util::sync::CancellationToken;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpStream;
+use tokio::sync::Mutex;
 
 use heretic_core::{HereticError, Result};
-use crate::heartbeat::HeartbeatTracker;
-use crate::midi::{open_midi_ports, send_sysex, MidiConnection};
-use crate::sysex::{decode_message, encode_message, new_request_id, Direction};
-#[allow(unused_imports)]
-use std::collections::HashMap;
 
-/// Config del bridge.
+const HEADER_SIZE: usize = 4;
+const MAX_FRAME: usize = 16 * 1024 * 1024;
+
+/// Config del bridge (cliente TCP al VST3).
 #[derive(Debug, Clone)]
 pub struct BridgeConfig {
-    /// Patrón del puerto MIDI output (server → FL). Default: "FLStudioMCP RX"
-    pub port_to_fl: String,
-    /// Patrón del puerto MIDI input (FL → server). Default: "FLStudioMCP TX"
-    pub port_from_fl: String,
-    /// Nombre del cliente MIDI (visible en FL > MIDI Settings). Default: "FLHeretic"
-    pub client_name: String,
-    /// Timeout para una operación round-trip. Default: 5s.
-    pub default_timeout: Duration,
-    /// Si true, espera al primer heartbeat antes de retornar de `connect()`.
-    pub wait_for_first_heartbeat: bool,
+    pub host: String,
+    pub port: u16,
+    pub timeout: Duration,
 }
 
 impl Default for BridgeConfig {
     fn default() -> Self {
         Self {
-            port_to_fl: crate::DEFAULT_PORT_TO_FL.into(),
-            port_from_fl: crate::DEFAULT_PORT_FROM_FL.into(),
-            client_name: "FLHeretic".into(),
-            default_timeout: Duration::from_secs(5),
-            wait_for_first_heartbeat: true,
+            host: "127.0.0.1".into(),
+            port: 9790,
+            timeout: Duration::from_secs(10),
         }
     }
 }
 
-/// Versión de FL reportada en el primer heartbeat.
+/// Versión de FL reportada por el bridge (via meta.ping).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FlVersionInfo {
+    pub bridge_version: String,
     pub fl_version: String,
-    pub protocol_version: u32,
-    pub raw: Value,
+    pub uptime_sec: f64,
+    pub script_dir: Option<String>,
 }
 
-/// Posición de canción reportada por FL.
+/// Posición de canción reportada por FL (de transport.status).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SongPosition {
-    pub position_ms: f64,
     pub position_ticks: i64,
-    pub position_beats: f64,
+    pub position_bars: f64,
+    pub position_seconds: f64,
     pub bpm: f64,
 }
 
-/// Mensaje interno: request del bridge → MIDI worker.
-struct BridgeRequest {
-    command: String,
-    params: Value,
-    response: oneshot::Sender<Result<Value>>,
+/// Estado del bridge (de transport.status).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TransportStatus {
+    pub is_playing: bool,
+    pub is_recording: bool,
+    pub bpm: f64,
+    pub position_ticks: i64,
+    pub position_bars: f64,
+    pub position_seconds: f64,
 }
 
-/// API pública del bridge MIDI.
+/// Cliente TCP al VST3 plugin.
+///
+/// Mantiene UNA conexión persistente con reconexión automática.
 #[derive(Clone)]
 pub struct FlBridge {
     inner: Arc<FlBridgeInner>,
@@ -100,314 +86,267 @@ pub struct FlBridge {
 
 struct FlBridgeInner {
     config: BridgeConfig,
-    /// Sender al MIDI worker (requests se envían por aquí).
-    request_tx: mpsc::UnboundedSender<BridgeRequest>,
-    /// Heartbeat tracker (compartido con el worker).
-    heartbeat: HeartbeatTracker,
-    /// Cancel token para apagar el worker limpiamente (Fase 5 lo usará para shutdown ordenado).
-    #[allow(dead_code)]
-    cancel: CancellationToken,
+    stream: Mutex<Option<TcpStream>>,
+    next_id: std::sync::atomic::AtomicU64,
 }
 
 impl std::fmt::Debug for FlBridge {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("FlBridge")
             .field("config", &self.inner.config)
-            .field("heartbeat_age_ms", &"<async>")
             .finish()
     }
 }
 
 impl FlBridge {
-    /// Abre los puertos MIDI y arranca el worker en background.
+    /// Crea un bridge (no conecta inmediatamente — lazy en primer `call`).
     pub fn connect(config: BridgeConfig) -> Result<Arc<Self>> {
-        let midi_conn = open_midi_ports(
-            Some(&config.port_to_fl),
-            Some(&config.port_from_fl),
-            &config.client_name,
-        )?;
-
-        let (request_tx, request_rx) = mpsc::unbounded_channel::<BridgeRequest>();
-        let heartbeat = HeartbeatTracker::new();
-        let cancel = CancellationToken::new();
-
-        // Spawnea el MIDI worker en un thread OS dedicado.
-        // Usa `std::thread` porque midir::MidiInputConnection requiere mantener
-        // el connection vivo en un thread con callback, no se puede await.
-        let worker_handle = spawn_midi_worker(
-            request_rx,
-            midi_conn,
-            heartbeat.clone(),
-            cancel.clone(),
-        );
-
-        let bridge = Arc::new(Self {
+        Ok(Arc::new(Self {
             inner: Arc::new(FlBridgeInner {
                 config,
-                request_tx,
-                heartbeat,
-                cancel,
+                stream: Mutex::new(None),
+                next_id: std::sync::atomic::AtomicU64::new(1),
             }),
-        });
-
-        // Worker handle guardado para cleanup futuro (Phase 5: watchdog)
-        // Por ahora, el thread se cierra cuando el bridge se dropea (channel se cierra)
-        std::mem::forget(worker_handle); // TODO: shutdown limpio
-
-        Ok(bridge)
+        }))
     }
 
-    /// Espera al primer heartbeat (si `wait_for_first_heartbeat` está habilitado).
-    pub async fn wait_ready(&self) -> Result<()> {
-        if self.inner.config.wait_for_first_heartbeat {
-            self.inner.heartbeat.wait_for_first(Duration::from_secs(5)).await?;
+    /// Espera a que el VST3 plugin esté listo (verifica con meta.ping).
+    pub async fn wait_ready(&self, timeout: Duration) -> Result<()> {
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            match self.ping().await {
+                Ok(_) => return Ok(()),
+                Err(_) => {
+                    if std::time::Instant::now() >= deadline {
+                        return Err(HereticError::Other(format!(
+                            "VST3 plugin no responde en {}s. ¿FL Studio está corriendo con el plugin cargado?",
+                            timeout.as_secs()
+                        )));
+                    }
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                }
+            }
+        }
+    }
+
+    async fn ensure_connected(&self) -> Result<()> {
+        let mut g = self.inner.stream.lock().await;
+        if g.is_none() {
+            tracing::debug!("[vst3-bridge] conectando a {}:{}", self.inner.config.host, self.inner.config.port);
+            let stream = tokio::time::timeout(
+                Duration::from_secs(5),
+                TcpStream::connect((self.inner.config.host.as_str(), self.inner.config.port)),
+            )
+            .await
+            .map_err(|_| HereticError::Other("timeout conectando a VST3 plugin".into()))?
+            .map_err(|e| HereticError::Other(format!("VST3 connect falló: {e}")))?;
+            stream.set_nodelay(true).ok();
+            *g = Some(stream);
+            tracing::debug!("[vst3-bridge] conectado a VST3 plugin");
         }
         Ok(())
     }
 
-    /// Estado del bridge (heartbeat age, alive).
-    pub async fn health(&self) -> FlHealth {
-        let info = self.inner.heartbeat.age().await;
-        FlHealth {
-            alive: self.inner.heartbeat.is_alive().await,
-            heartbeat_age_ms: info.as_ref().map(|i| i.age.as_millis() as u64),
-            fl_version: info.and_then(|i| i.fl_version),
-        }
-    }
-
-    /// Llamada genérica a cualquier comando (escape hatch).
-    pub async fn call(&self, command: &str, params: Value) -> Result<Value> {
-        self.call_with_timeout(command, params, self.inner.config.default_timeout).await
-    }
-
-    /// Llamada con timeout explícito.
-    pub async fn call_with_timeout(
-        &self,
-        command: &str,
-        params: Value,
-        timeout: Duration,
-    ) -> Result<Value> {
-        // Verifica que FL está vivo antes de enviar (circuit breaker barato)
-        if !self.inner.heartbeat.is_alive().await {
-            return Err(HereticError::Other(
-                "FL no responde (heartbeat stale). ¿Está corriendo?".into(),
-            ));
-        }
-
-        let (response_tx, response_rx) = oneshot::channel();
+    fn next_id(&self) -> i64 {
         self.inner
-            .request_tx
-            .send(BridgeRequest {
-                command: command.to_string(),
-                params,
-                response: response_tx,
-            })
-            .map_err(|_| HereticError::Other("MIDI worker channel cerrado".into()))?;
+            .next_id
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed) as i64
+    }
 
-        match tokio::time::timeout(timeout, response_rx).await {
-            Ok(Ok(result)) => result,
-            Ok(Err(_)) => Err(HereticError::Other("response channel cerrado".into())),
-            Err(_) => Err(HereticError::Other(format!(
-                "timeout esperando response a '{}' ({}ms)",
-                command,
-                timeout.as_millis()
-            ))),
+    /// Llamada raw al bridge (cualquier action).
+    pub async fn call(&self, action: &str, params: Value) -> Result<Value> {
+        // Retry una vez si la conexión se cayó
+        for attempt in 0..2 {
+            if let Err(e) = self.ensure_connected().await {
+                if attempt == 0 {
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    continue;
+                }
+                return Err(e);
+            }
+            let id = self.next_id();
+            let req = json!({"id": id, "action": action, "params": params});
+            let body = serde_json::to_vec(&req)?;
+
+            let mut g = self.inner.stream.lock().await;
+            let stream = match g.as_mut() {
+                Some(s) => s,
+                None => {
+                    drop(g);
+                    if attempt == 0 {
+                        continue;
+                    }
+                    return Err(HereticError::Other("VST3 stream not initialized".into()));
+                }
+            };
+
+            // 1. Enviar frame
+            let len = body.len() as u32;
+            if let Err(e) = tokio::time::timeout(
+                self.inner.config.timeout,
+                async {
+                    stream.write_all(&len.to_be_bytes()).await?;
+                    stream.write_all(&body).await?;
+                    stream.flush().await?;
+                    Ok::<(), std::io::Error>(())
+                },
+            )
+            .await
+            {
+                *g = None; // reset connection
+                drop(g);
+                if attempt == 0 {
+                    continue;
+                }
+                return Err(HereticError::Other(format!("VST3 write timeout: {e}")));
+            }
+
+            // 2. Leer response
+            let mut header = [0u8; HEADER_SIZE];
+            match tokio::time::timeout(self.inner.config.timeout, stream.read_exact(&mut header)).await {
+                Ok(Ok(_)) => {}
+                Ok(Err(e)) => {
+                    *g = None;
+                    drop(g);
+                    if attempt == 0 {
+                        continue;
+                    }
+                    return Err(HereticError::Other(format!("VST3 read header: {e}")));
+                }
+                Err(_) => {
+                    *g = None;
+                    drop(g);
+                    if attempt == 0 {
+                        continue;
+                    }
+                    return Err(HereticError::Other(format!("VST3 read timeout (action: {action})")));
+                }
+            }
+            let resp_len = u32::from_be_bytes(header) as usize;
+            if resp_len > MAX_FRAME {
+                *g = None;
+                drop(g);
+                return Err(HereticError::Other(format!("VST3 response demasiado grande: {resp_len}")));
+            }
+            let mut body = vec![0u8; resp_len];
+            match tokio::time::timeout(self.inner.config.timeout, stream.read_exact(&mut body)).await {
+                Ok(Ok(_)) => {}
+                Ok(Err(e)) => {
+                    *g = None;
+                    drop(g);
+                    if attempt == 0 {
+                        continue;
+                    }
+                    return Err(HereticError::Other(format!("VST3 read body: {e}")));
+                }
+                Err(_) => {
+                    *g = None;
+                    drop(g);
+                    if attempt == 0 {
+                        continue;
+                    }
+                    return Err(HereticError::Other(format!("VST3 read body timeout (action: {action})")));
+                }
+            }
+            drop(g);
+
+            // 3. Parsear
+            let resp: Value = match serde_json::from_slice(&body) {
+                Ok(v) => v,
+                Err(e) => {
+                    return Err(HereticError::Other(format!(
+                        "VST3 response parse error: {e}, body={}",
+                        String::from_utf8_lossy(&body[..body.len().min(200)])
+                    )));
+                }
+            };
+
+            if resp.get("ok") == Some(&Value::Bool(true)) {
+                return Ok(resp.get("result").cloned().unwrap_or(Value::Null));
+            } else {
+                let err = resp
+                    .get("error")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown error");
+                return Err(HereticError::Other(format!(
+                    "VST3 action '{action}' error: {err}"
+                )));
+            }
         }
+        Err(HereticError::Other("VST3 call failed after retries".into()))
     }
 
     // ============================================================
-    // Tools transport (mirror del FLStudioMCP legacy)
+    // Tools transport (mapean a actions fLMCP Bridge via VST3 proxy)
     // ============================================================
 
-    /// `fl_ping` — eco del controller script.
+    /// `meta.ping` — health check del bridge.
     pub async fn ping(&self) -> Result<FlVersionInfo> {
-        let data = self.call("ping", json!({})).await?;
-        let fl_version = data
-            .get("fl_version")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| HereticError::Other("ping response sin fl_version".into()))?
-            .to_string();
-        let protocol_version = data
-            .get("protocol_version")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(crate::MIDI_PROTOCOL_VERSION as u64) as u32;
+        let data = self.call("meta.ping", json!({})).await?;
         Ok(FlVersionInfo {
-            fl_version,
-            protocol_version,
-            raw: data,
+            bridge_version: data
+                .get("bridge_version")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown")
+                .to_string(),
+            fl_version: data
+                .get("fl_version")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown")
+                .to_string(),
+            uptime_sec: data
+                .get("uptime_sec")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(0.0),
+            script_dir: data.get("script_dir").and_then(|v| v.as_str()).map(String::from),
         })
     }
 
-    /// `fl_get_tempo` — BPM actual.
-    pub async fn get_tempo(&self) -> Result<f64> {
-        let data = self.call("get_tempo", json!({})).await?;
-        data.get("bpm")
-            .and_then(|v| v.as_f64())
-            .ok_or_else(|| HereticError::Other("get_tempo response sin bpm".into()))
+    /// `transport.status` — devuelve estado completo (playing, recording, tempo, position).
+    pub async fn transport_status(&self) -> Result<TransportStatus> {
+        let data = self.call("transport.status", json!({})).await?;
+        Ok(TransportStatus {
+            is_playing: data.get("is_playing").and_then(|v| v.as_bool()).unwrap_or(false),
+            is_recording: data.get("is_recording").and_then(|v| v.as_bool()).unwrap_or(false),
+            bpm: data.get("bpm").and_then(|v| v.as_f64()).unwrap_or(120.0),
+            position_ticks: data.get("position_ticks").and_then(|v| v.as_i64()).unwrap_or(0),
+            position_bars: data.get("position_bars").and_then(|v| v.as_f64()).unwrap_or(0.0),
+            position_seconds: data.get("position_seconds").and_then(|v| v.as_f64()).unwrap_or(0.0),
+        })
     }
 
-    /// `fl_set_tempo` — setea BPM (rango 10-999).
+    /// `transport.start`.
+    pub async fn play(&self) -> Result<()> {
+        let _ = self.call("transport.start", json!({})).await?;
+        Ok(())
+    }
+
+    /// `transport.stop`.
+    pub async fn stop(&self) -> Result<()> {
+        let _ = self.call("transport.stop", json!({})).await?;
+        Ok(())
+    }
+
+    /// `transport.set_tempo`.
     pub async fn set_tempo(&self, bpm: f64) -> Result<f64> {
-        if bpm < 10.0 || bpm > 999.0 {
-            return Err(HereticError::Other(format!("bpm fuera de rango: {bpm}")));
+        if !(10.0..=999.0).contains(&bpm) {
+            return Err(HereticError::Other(format!("bpm fuera de rango 10-999: {bpm}")));
         }
-        let data = self.call("set_tempo", json!({ "bpm": bpm })).await?;
+        let data = self.call("transport.set_tempo", json!({ "bpm": bpm })).await?;
         data.get("bpm")
             .and_then(|v| v.as_f64())
             .ok_or_else(|| HereticError::Other("set_tempo response sin bpm".into()))
     }
 
-    /// `fl_play` — transport.start().
-    pub async fn play(&self) -> Result<()> {
-        let _ = self.call("play", json!({})).await?;
-        Ok(())
-    }
-
-    /// `fl_stop` — transport.stop().
-    pub async fn stop(&self) -> Result<()> {
-        let _ = self.call("stop", json!({})).await?;
-        Ok(())
-    }
-
-    /// `fl_get_song_position` — posición actual.
-    pub async fn get_song_position(&self) -> Result<SongPosition> {
-        let data = self.call("get_song_position", json!({})).await?;
-        Ok(SongPosition {
-            position_ms: data.get("position_ms").and_then(|v| v.as_f64()).unwrap_or(0.0),
-            position_ticks: data.get("position_ticks").and_then(|v| v.as_i64()).unwrap_or(0),
-            position_beats: data.get("position_beats").and_then(|v| v.as_f64()).unwrap_or(0.0),
-            bpm: data.get("bpm").and_then(|v| v.as_f64()).unwrap_or(120.0),
-        })
-    }
-
-    /// `fl_set_song_position` — por ms.
-    pub async fn set_song_position_ms(&self, ms: f64) -> Result<SongPosition> {
-        let data = self.call("set_song_position", json!({ "ms": ms })).await?;
-        Ok(SongPosition {
-            position_ms: data.get("position_ms").and_then(|v| v.as_f64()).unwrap_or(0.0),
-            position_ticks: data.get("position_ticks").and_then(|v| v.as_i64()).unwrap_or(0),
-            position_beats: data.get("position_beats").and_then(|v| v.as_f64()).unwrap_or(0.0),
-            bpm: data.get("bpm").and_then(|v| v.as_f64()).unwrap_or(120.0),
-        })
-    }
-}
-
-/// Estado de salud del bridge.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct FlHealth {
-    pub alive: bool,
-    pub heartbeat_age_ms: Option<u64>,
-    pub fl_version: Option<String>,
-}
-
-/// Spawnea el MIDI worker en un thread OS dedicado.
-///
-/// Recibe requests por `request_rx` y mensajes MIDI entrantes por `midi_conn.incoming_rx`.
-/// Mantiene un map `request_id -> oneshot::Sender` para correlación.
-fn spawn_midi_worker(
-    request_rx: mpsc::UnboundedReceiver<BridgeRequest>,
-    midi_conn: MidiConnection,
-    heartbeat: HeartbeatTracker,
-    cancel: CancellationToken,
-) -> std::thread::JoinHandle<()> {
-    std::thread::spawn(move || {
-        run_midi_worker(request_rx, midi_conn, heartbeat, cancel);
-    })
-}
-
-fn run_midi_worker(
-    mut request_rx: mpsc::UnboundedReceiver<BridgeRequest>,
-    mut midi_conn: MidiConnection,
-    heartbeat: HeartbeatTracker,
-    cancel: CancellationToken,
-) {
-    // Map: request_id -> oneshot::Sender para entregar el response cuando llegue.
-    let pending: std::sync::Mutex<HashMap<String, oneshot::Sender<Result<Value>>>> =
-        std::sync::Mutex::new(HashMap::new());
-
-    // Bloqueamos el thread en el recv de MIDI. No podemos await en std::thread.
-    // Pero mpsc::UnboundedReceiver se puede usar sync vía `try_recv` + sleep, o
-    // vía `blocking_recv` (no existe para tokio). Usaremos un patrón sync/async:
-    // el worker hace poll en un loop con `try_recv` y sleep corto.
-
-    loop {
-        if cancel.is_cancelled() {
-            break;
-        }
-
-        // 1. Procesar requests pendientes (no bloqueante)
-        while let Ok(req) = request_rx.try_recv() {
-            let id = new_request_id();
-            let payload = json!({
-                "v": crate::MIDI_PROTOCOL_VERSION,
-                "cmd": req.command,
-                "params": req.params,
-            });
-            let sysex = encode_message(Direction::Request, &id, &payload);
-            if let Err(e) = send_sysex(&midi_conn.out, &sysex) {
-                let _ = req.response.send(Err(e));
-                continue;
-            }
-            // Guardamos el oneshot para entregar el response cuando llegue
-            let mut p = pending.lock().expect("single-thread worker");
-            p.insert(id, req.response);
-        }
-
-        // 2. Procesar mensajes MIDI entrantes (no bloqueante — usamos try_recv sync)
-        //    El channel incoming_rx es async, pero como estamos en thread OS,
-        //    hacemos try_recv. Si está vacío, sleepamos un poco.
-        match midi_conn.incoming_rx.try_recv() {
-            Ok(msg_bytes) => {
-                if let Some(decoded) = decode_message(&msg_bytes) {
-                    if decoded.direction == Direction::Heartbeat {
-                        // Heartbeat → tracker
-                        let h = heartbeat.clone();
-                        let payload = decoded.payload.clone();
-                        // Spawn tokio task para actualizar el tracker (es async)
-                        tokio::spawn(async move {
-                            h.record(payload).await;
-                        });
-                    } else if decoded.direction == Direction::Response {
-                        // Response → match por request_id y entregar
-                        let id = decoded.request_id.clone();
-                        let payload = decoded.payload.clone();
-                        let mut p = match pending.lock() {
-                            Ok(g) => g,
-                            Err(_) => continue,
-                        };
-                        if let Some(tx) = p.remove(&id) {
-                            // FL puede devolver {"ok": false, "error": ...} o {"ok": true, "data": ...}
-                            // El formato del FLStudioMCP legacy es: response.ok + response.data
-                            let result = if payload.get("ok") == Some(&Value::Bool(true)) {
-                                Ok(payload.get("data").cloned().unwrap_or(Value::Null))
-                            } else {
-                                let msg = payload
-                                    .get("error")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or("FL error")
-                                    .to_string();
-                                let code = payload
-                                    .get("code")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or("fl_error")
-                                    .to_string();
-                                Err(HereticError::Other(format!("[{code}] {msg}")))
-                            };
-                            let _ = tx.send(result);
-                        }
-                    }
-                    // Direction::Request desde FL no debería ocurrir (FL no nos envía requests)
-                }
-            }
-            Err(mpsc::error::TryRecvError::Empty) => {
-                // No hay mensajes — sleepamos un poco
-                std::thread::sleep(Duration::from_millis(5));
-            }
-            Err(mpsc::error::TryRecvError::Disconnected) => {
-                // Bridge dropeado — salimos
-                break;
-            }
-        }
+    /// `transport.set_position` — units: "bars" (default), "ms", "seconds", "ticks", "steps".
+    pub async fn set_position(&self, position: f64, unit: &str) -> Result<TransportStatus> {
+        let _ = self
+            .call(
+                "transport.set_position",
+                json!({ "position": position, "unit": unit }),
+            )
+            .await?;
+        self.transport_status().await
     }
 }
 
@@ -416,19 +355,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn bridge_config_defaults() {
+    fn config_defaults() {
         let c = BridgeConfig::default();
-        assert_eq!(c.port_to_fl, "FLStudioMCP RX");
-        assert_eq!(c.port_from_fl, "FLStudioMCP TX");
-        assert_eq!(c.default_timeout, Duration::from_secs(5));
-        assert!(c.wait_for_first_heartbeat);
-    }
-
-    #[test]
-    fn song_position_deserialize() {
-        let json = r#"{"position_ms": 1000.0, "position_ticks": 96, "position_beats": 4.0, "bpm": 128.0}"#;
-        let pos: SongPosition = serde_json::from_str(json).unwrap();
-        assert_eq!(pos.position_ms, 1000.0);
-        assert_eq!(pos.bpm, 128.0);
+        assert_eq!(c.host, "127.0.0.1");
+        assert_eq!(c.port, 9790);
     }
 }

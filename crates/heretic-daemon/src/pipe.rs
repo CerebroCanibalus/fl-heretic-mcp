@@ -1,27 +1,29 @@
-//! Named Pipe server + JSON-RPC dispatch (Fase 2).
+//! Named Pipe server + JSON-RPC dispatch (Fase 2.5).
+//!
+//! Adaptado al protocolo fLMCP Bridge (file-RPC + TCP). NO usa MIDI SysEx.
 //!
 //! Flujo:
 //! 1. Cargar token + audit log.
-//! 2. Abrir bridge MIDI (heretic-fl) — abre loopMIDI ports + MIDI worker.
-//! 3. Esperar primer heartbeat (FL está corriendo con controller script).
+//! 2. Crear `FlBridge` (fLMCP Bridge) — file-RPC + TCP con fallback.
+//! 3. Health check: `meta.ping` para verificar que el bridge responde.
 //! 4. Bind Named Pipe + accept loop.
 //! 5. Por cada cliente: handshake HMAC + dispatch loop usando `Transport`.
 //!
-//! ## Handlers disponibles (Fase 2)
+//! ## Handlers disponibles (Fase 2.5)
 //!
-//! | Método                 | Handler      | Notas                          |
-//! |------------------------|--------------|--------------------------------|
-//! | `ping`                 | daemon       | Eco simple, no requiere FL     |
-//! | `health`               | daemon       | Estado del bridge MIDI         |
-//! | `get_tempo`            | transport    | BPM actual                     |
-//! | `set_tempo`            | transport    | Set BPM (10-999)               |
-//! | `play`                 | transport    | transport.start()              |
-//! | `stop`                 | transport    | transport.stop()               |
-//! | `get_play_state`       | transport    | playing + recording            |
-//! | `get_song_position`    | transport    | ms, ticks, beats, bpm           |
-//! | `set_song_position`    | transport    | por ms, beats, o ticks         |
+//! | Método                 | Handler      | Action fLMCP Bridge    |
+//! |------------------------|--------------|------------------------|
+//! | `ping`                 | daemon       | (no requiere bridge)   |
+//! | `health`               | daemon       | bridge.health()        |
+//! | `get_tempo`            | transport    | `transport.status`     |
+//! | `set_tempo`            | transport    | `transport.set_tempo`  |
+//! | `play`                 | transport    | `transport.start`      |
+//! | `stop`                 | transport    | `transport.stop`       |
+//! | `get_play_state`       | transport    | `transport.status`     |
+//! | `get_song_position`    | transport    | `transport.status`     |
+//! | `set_song_position`    | transport    | `transport.set_position`|
 //!
-//! Fase 3 añadirá el resto de tools del FLStudioMCP legacy.
+//! Fase 3 añadirá el resto de las 133 actions (mixer, channels, plugins, etc.)
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -33,12 +35,11 @@ use heretic_core::{
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
-use crate::handlers::Transport;
 #[cfg(windows)]
 use tokio::net::windows::named_pipe::{NamedPipeServer, ServerOptions};
 
-#[cfg(windows)]
 use heretic_fl::{BridgeConfig, FlBridge};
+use crate::handlers::Transport;
 
 /// Config del daemon.
 #[derive(Debug, Clone)]
@@ -46,14 +47,13 @@ pub struct Config {
     pub pipe_name: String,
     pub token_path: PathBuf,
     pub audit_path: PathBuf,
-    /// Patrón del puerto MIDI output. Default: `FLStudioMCP RX`.
-    pub midi_port_to_fl: Option<String>,
-    /// Patrón del puerto MIDI input. Default: `FLStudioMCP TX`.
-    pub midi_port_from_fl: Option<String>,
-    /// Cliente MIDI name (visible en FL > MIDI Settings). Default: `FLHeretic`.
-    pub midi_client_name: String,
-    /// Esperar primer heartbeat antes de retornar de `run()`. Default: true.
-    pub wait_for_heartbeat: bool,
+    /// Directorio del script fLMCP Bridge (donde está `device_FLStudioMCP.py`).
+    /// Default: `%USERPROFILE%\Documents\Image-Line\FL Studio\Settings\Hardware\fLMCP Bridge`.
+    pub script_dir: PathBuf,
+    /// Si true, intenta TCP antes que file-RPC.
+    pub try_tcp: bool,
+    /// Si true, verifica el bridge con meta.ping antes de aceptar clientes.
+    pub wait_for_bridge: bool,
 }
 
 impl Config {
@@ -66,10 +66,9 @@ impl Config {
             audit_path: audit
                 .map(PathBuf::from)
                 .unwrap_or_else(AuditLog::default_path),
-            midi_port_to_fl: None,
-            midi_port_from_fl: None,
-            midi_client_name: "FLHeretic".into(),
-            wait_for_heartbeat: true,
+            script_dir: heretic_fl::default_script_dir(),
+            try_tcp: true,
+            wait_for_bridge: true,
         }
     }
 }
@@ -89,10 +88,10 @@ pub fn run(
     let config = Config::from_opts(pipe, token_path, audit_path);
 
     tracing::info!("daemon arrancando");
-    tracing::info!("  pipe:    {}", config.pipe_name);
-    tracing::info!("  token:   {}", config.token_path.display());
-    tracing::info!("  audit:   {}", config.audit_path.display());
-    tracing::info!("  midi client: {}", config.midi_client_name);
+    tracing::info!("  pipe:       {}", config.pipe_name);
+    tracing::info!("  token:      {}", config.token_path.display());
+    tracing::info!("  audit:      {}", config.audit_path.display());
+    tracing::info!("  script_dir: {}", config.script_dir.display());
 
     // Cargar token (crear si no existe)
     let store = TokenStore::new(config.token_path.clone());
@@ -101,7 +100,10 @@ pub fn run(
 
     // Audit log
     let audit = Arc::new(AuditLog::open(config.audit_path.clone())?);
-    tracing::info!("  audit log abierto ({} eventos previos)", audit.len().unwrap_or(0));
+    tracing::info!(
+        "  audit log abierto ({} eventos previos)",
+        audit.len().unwrap_or(0)
+    );
 
     // Tokio runtime
     let rt = tokio::runtime::Builder::new_multi_thread()
@@ -115,37 +117,40 @@ pub fn run(
     })
 }
 
-/// Tokio async: abre MIDI bridge + bind Named Pipe + accept loop.
-#[cfg(windows)]
+/// Tokio async: crea bridge fLMCP + bind Named Pipe + accept loop.
 async fn serve(
     config: Config,
     token: Token,
     audit: Arc<AuditLog>,
 ) -> Result<(), HereticError> {
-    // 1. Abrir MIDI bridge
+    // 1. Crear bridge fLMCP (file-RPC + TCP)
     let bridge_config = BridgeConfig {
-        port_to_fl: config
-            .midi_port_to_fl
-            .clone()
-            .unwrap_or_else(|| "FLStudioMCP RX".into()),
-        port_from_fl: config
-            .midi_port_from_fl
-            .clone()
-            .unwrap_or_else(|| "FLStudioMCP TX".into()),
-        client_name: config.midi_client_name.clone(),
-        default_timeout: std::time::Duration::from_secs(5),
-        wait_for_first_heartbeat: true,  // el bridge espera internamente (5s)
+        script_dir: config.script_dir.clone(),
+        try_tcp: config.try_tcp,
+        tcp_host: heretic_fl::DEFAULT_TCP_HOST.into(),
+        tcp_port: heretic_fl::DEFAULT_TCP_PORT,
+        timeout: std::time::Duration::from_secs(10),
     };
     let bridge = FlBridge::connect(bridge_config)
-        .map_err(|e| HereticError::Other(format!("abriendo MIDI bridge: {e}")))?;
+        .map_err(|e| HereticError::Other(format!("creando bridge fLMCP: {e}")))?;
+    tracing::info!("  bridge: {} + {}", bridge.health().primary, bridge.health().fallback);
 
-    if config.wait_for_heartbeat {
-        tracing::info!("esperando primer heartbeat del controller script...");
-        bridge
-            .wait_ready()
-            .await
-            .map_err(|e| HereticError::Other(format!("FL no responde: {e}")))?;
-        tracing::info!("FL alive — heartbeat recibido");
+    if config.wait_for_bridge {
+        tracing::info!("verificando conexión al fLMCP Bridge (meta.ping)...");
+        match bridge.ping().await {
+            Ok(info) => {
+                tracing::info!(
+                    "  fLMCP Bridge OK: bridge={} fl={} uptime={}s",
+                    info.bridge_version, info.fl_version, info.uptime_sec
+                );
+            }
+            Err(e) => {
+                tracing::error!("  fLMCP Bridge no responde: {e}");
+                return Err(HereticError::Other(format!(
+                    "fLMCP Bridge no responde: {e}. ¿FL Studio está corriendo con el controller script instalado?"
+                )));
+            }
+        }
     }
 
     let transport = Arc::new(Transport::new(bridge));
@@ -178,17 +183,6 @@ async fn serve(
     }
 }
 
-#[cfg(not(windows))]
-async fn serve(
-    _config: Config,
-    _token: Token,
-    _audit: Arc<AuditLog>,
-) -> Result<(), HereticError> {
-    Err(HereticError::Other(
-        "daemon solo soporta Windows (Named Pipes + MIDI)".into(),
-    ))
-}
-
 /// Maneja una conexión: handshake + dispatch loop.
 async fn handle_client(
     client: NamedPipeServer,
@@ -216,7 +210,8 @@ async fn handle_client(
     }
     let auth_envelope: Value = serde_json::from_str(line.trim())?;
     let auth_resp: AuthResponse = serde_json::from_value(
-        auth_envelope.get("data")
+        auth_envelope
+            .get("data")
             .ok_or_else(|| HereticError::AuthFailed("missing data field".into()))?
             .clone(),
     )?;
@@ -291,7 +286,6 @@ async fn send_response<W: tokio::io::AsyncWrite + Unpin>(
 /// Dispatch un Request al handler apropiado. Primero intenta transport; si no
 /// es un método transport, usa el fallback del daemon (`ping`/`health`).
 async fn dispatch(req: &Request, transport: &Transport) -> Response {
-    // Intentar transport primero (cubre todos los métodos MIDI)
     match transport.dispatch(req.tool_name(), req.params_or_empty()).await {
         Ok(data) => Response::ok(req.id.clone(), data),
         Err(e) => Response::from_heretic(&req.id, &e),

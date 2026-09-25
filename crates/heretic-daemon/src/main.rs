@@ -53,6 +53,9 @@ enum Cmd {
         /// Path del audit log SQLite (default: `%LOCALAPPDATA%\fl-heretic\audit.db`).
         #[arg(long)]
         audit_path: Option<String>,
+        /// Path del script dir del fLMCP Bridge (default: %USERPROFILE%\Documents\Image-Line\FL Studio\Settings\Hardware\fLMCP Bridge).
+        #[arg(long)]
+        script_dir: Option<String>,
     },
     /// Arranca el MCP server (stdio). STUB en Fase 1, implementación en Fase 2.
     Mcp {
@@ -87,7 +90,8 @@ fn main() -> ExitCode {
     );
 
     match cli.cmd {
-        Cmd::Daemon { pipe, token_path, audit_path } => {
+        Cmd::Daemon { pipe, token_path, audit_path, script_dir: _ } => {
+            // Por ahora: el script_dir se detecta automáticamente. En Fase 3 se pasa via flag.
             match pipe::run(pipe, token_path, audit_path) {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(e) => {

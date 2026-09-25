@@ -1,12 +1,25 @@
-// TCP server thread — acepta conexiones en 127.0.0.1:<port> y procesa JSON-RPC.
+// TCP server + file-RPC proxy — el VST3 plugin actúa como router entre
+// el daemon Rust (TCP en 127.0.0.1:9790) y el fLMCP Bridge (file-RPC en
+// %USERPROFILE%\Documents\...\fLMCP Bridge\rpc_*.json).
+//
+// Cada cliente TCP que se conecta:
+// 1. Lee un frame [BE u32 len][body JSON]
+// 2. Parsea el request {id, action, params}
+// 3. Lo re-empaqueta como file-RPC al Bridge
+// 4. Espera la respuesta (con timeout)
+// 5. Devuelve la respuesta al cliente TCP como frame JSON
+//
+// El plugin es esencialmente un PROXY stateless.
 
 #include "tcp_server.h"
 #include "protocol.h"
-#include "handlers/transport.h"
+#include "file_rpc_client.h"
 #include "handlers/meta.h"
+#include "handlers/transport.h"
 #include "handlers/mixer.h"
 
 #include <atomic>
+#include <chrono>
 #include <cstring>
 #include <cstdio>
 #include <mutex>
@@ -37,7 +50,7 @@
 namespace flheretic {
 
 // ============================================================================
-// Estado global del server (sockets activos + dispatch)
+// Estado global del server
 // ============================================================================
 
 namespace {
@@ -46,6 +59,11 @@ struct ServerState {
     SOCKET listen_sock = INVALID_SOCKET;
     std::mutex clients_mutex;
     std::set<SOCKET> clients;
+    /// Cliente file-RPC compartido entre todos los handlers.
+    /// Thread-safe (mutex interno).
+    FileRpcClient rpc;
+    /// Próximo id (atómico para evitar colisiones).
+    std::atomic<uint64_t> next_id{1};
 };
 
 ServerState g_state;
@@ -64,8 +82,6 @@ bool init_sockets_once() {
 #endif
 }
 
-// Lee exactamente N bytes (bloqueante).
-// Retorna true si leyó todos los bytes, false si EOF/error.
 bool read_exact(SOCKET sock, char* buf, size_t n) {
     size_t total = 0;
     while (total < n) {
@@ -76,7 +92,6 @@ bool read_exact(SOCKET sock, char* buf, size_t n) {
     return true;
 }
 
-// Escribe exactamente N bytes (bloqueante).
 bool write_exact(SOCKET sock, const char* buf, size_t n) {
     size_t total = 0;
     while (total < n) {
@@ -87,36 +102,10 @@ bool write_exact(SOCKET sock, const char* buf, size_t n) {
     return true;
 }
 
-// Dispatch del request al handler correcto y devuelve el JSON del resultado.
-std::string dispatch_request(const protocol::Request& req) {
-    using namespace flheretic::handlers;
-    if (req.action == "meta.ping") {
-        return meta::ping(req);
-    } else if (req.action == "meta.info") {
-        return meta::info(req);
-    } else if (req.action == "transport.start") {
-        return transport::start(req);
-    } else if (req.action == "transport.stop") {
-        return transport::stop(req);
-    } else if (req.action == "transport.status") {
-        return transport::status(req);
-    } else if (req.action == "transport.set_tempo") {
-        return transport::set_tempo(req);
-    } else if (req.action == "transport.set_position") {
-        return transport::set_position(req);
-    } else if (req.action == "mixer.set_volume") {
-        return mixer::set_volume(req);
-    } else if (req.action == "mixer.get_peaks") {
-        return mixer::get_peaks(req);
-    }
-    return std::string("{\"error\":\"unknown action: ") + req.action + "\"}";
-}
-
-// Maneja una conexión cliente.
+/// Maneja una conexión cliente. Cada cliente = una request (stateless).
 void handle_client(SOCKET sock) {
-    std::fprintf(stderr, "[FL Heretic] cliente conectado (sock=%d)\n", static_cast<int>(sock));
+    std::fprintf(stderr, "[FL Heretic] cliente TCP conectado (sock=%d)\n", static_cast<int>(sock));
 
-    // Registrar el socket
     {
         std::lock_guard<std::mutex> lock(g_state.clients_mutex);
         g_state.clients.insert(sock);
@@ -137,46 +126,37 @@ void handle_client(SOCKET sock) {
 
         // Parsear request
         protocol::Request req;
-        std::string result_json;
+        std::string response;
         if (!protocol::parse_request(body_str, req)) {
-            result_json = protocol::build_error_response(0, "invalid request JSON");
+            response = protocol::build_error_response(0, "invalid request JSON");
         } else {
-            std::fprintf(stderr, "[FL Heretic] dispatch: id=%lld action=%s\n",
+            std::fprintf(stderr, "[FL Heretic] proxy: id=%lld action=%s\n",
                           static_cast<long long>(req.id), req.action.c_str());
-            try {
-                result_json = dispatch_request(req);
-            } catch (const std::exception& e) {
-                result_json = protocol::build_error_response(req.id, e.what());
-            } catch (...) {
-                result_json = protocol::build_error_response(req.id, "unknown exception");
+            // Delegar TODO al file-RPC (FL API access viene del Bridge).
+            // El plugin VST3 es solo un proxy stateless.
+            std::string rpc_response;
+            bool ok = g_state.rpc.call(req.action, req.params_json, req.id, rpc_response, 5000);
+            if (ok) {
+                response = std::move(rpc_response);
+            } else {
+                response = protocol::build_error_response(req.id,
+                    "file-RPC timeout — ¿FL Heretic Bridge cargado en FL Studio?");
             }
         }
 
         // Enviar response (siempre)
-        std::string response;
-        if (req.id == 0 && result_json.find("\"error\"") != std::string::npos) {
-            response = protocol::build_error_response(0, result_json);
-        } else if (req.id == 0) {
-            response = protocol::build_ok_response(0, result_json);
-        } else if (result_json.find("\"error\"") != std::string::npos) {
-            // El handler devolvió JSON con error
-            response = protocol::build_error_response(req.id,
-                result_json.substr(result_json.find("\"error\":") + 9));
-        } else {
-            response = protocol::build_ok_response(req.id, result_json);
-        }
         std::string frame;
         protocol::encode_frame(response, frame);
         if (!write_exact(sock, frame.data(), frame.size())) break;
     }
 
-    // Cleanup
     {
         std::lock_guard<std::mutex> lock(g_state.clients_mutex);
         g_state.clients.erase(sock);
     }
     closesocket(sock);
-    std::fprintf(stderr, "[FL Heretic] cliente desconectado (sock=%d)\n", static_cast<int>(sock));
+    std::fprintf(stderr, "[FL Heretic] cliente TCP desconectado (sock=%d)\n",
+                  static_cast<int>(sock));
 }
 
 void server_thread_main(uint16_t port, std::atomic<bool>& running) {
@@ -211,9 +191,10 @@ void server_thread_main(uint16_t port, std::atomic<bool>& running) {
         return;
     }
     g_state.listen_sock = listen_sock;
-    std::fprintf(stderr, "[FL Heretic] TCP server escuchando en 127.0.0.1:%u\n", port);
+    std::fprintf(stderr, "[FL Heretic] TCP server (proxy) escuchando en 127.0.0.1:%u\n", port);
+    std::fprintf(stderr, "[FL Heretic] delegando a fLMCP Bridge via file-RPC en %s\n",
+                  g_state.rpc.script_dir().c_str());
 
-    // Set non-blocking para que accept() no bloquee indefinidamente
 #ifdef _WIN32
     u_long mode = 1;
     ioctlsocket(listen_sock, FIONBIO, &mode);
@@ -229,7 +210,6 @@ void server_thread_main(uint16_t port, std::atomic<bool>& running) {
                                       reinterpret_cast<sockaddr*>(&client_addr),
                                       &addr_len);
         if (client_sock == INVALID_SOCKET) {
-            // No hay conexiones pendientes — verificar running y reintentar
 #ifdef _WIN32
             Sleep(50);
 #else
@@ -238,7 +218,6 @@ void server_thread_main(uint16_t port, std::atomic<bool>& running) {
             continue;
         }
 
-        // Set blocking para I/O del cliente (necesario para read_exact bloqueante)
 #ifdef _WIN32
         u_long mode_blocking = 0;
         ioctlsocket(client_sock, FIONBIO, &mode_blocking);
@@ -249,15 +228,12 @@ void server_thread_main(uint16_t port, std::atomic<bool>& running) {
 
         char ip_str[INET_ADDRSTRLEN] = {0};
         inet_ntop(AF_INET, &client_addr.sin_addr, ip_str, sizeof(ip_str));
-        std::fprintf(stderr, "[FL Heretic] conexión aceptada desde %s:%u\n",
+        std::fprintf(stderr, "[FL Heretic] TCP conexión desde %s:%u\n",
                       ip_str, ntohs(client_addr.sin_port));
 
-        // Manejar cliente en el mismo thread (serializado, simple).
-        // Si necesitamos concurrencia, spawneamos thread por cliente.
         handle_client(client_sock);
     }
 
-    // Cerrar conexiones restantes
     {
         std::lock_guard<std::mutex> lock(g_state.clients_mutex);
         for (SOCKET c : g_state.clients) closesocket(c);
@@ -273,10 +249,6 @@ void server_thread_main(uint16_t port, std::atomic<bool>& running) {
 
 }  // namespace
 
-// ============================================================================
-// API pública
-// ============================================================================
-
 bool start_tcp_server(TcpServerHolder& holder, uint16_t port) {
     holder.port = port;
     holder.running.store(true);
@@ -286,21 +258,15 @@ bool start_tcp_server(TcpServerHolder& holder, uint16_t port) {
         holder.running.store(false);
         return false;
     }
-    // Detach para que el thread se limpie solo al terminar
     holder.thread.detach();
     return true;
 }
 
 void stop_tcp_server(TcpServerHolder& holder) {
     holder.running.store(false);
-    // Cerrar el listen socket para desbloquear accept()
     if (g_state.listen_sock != INVALID_SOCKET) {
-        shutdown(g_state.listen_sock, 2 /* SHUT_RDWR */);
+        shutdown(g_state.listen_sock, 2);
     }
-    // El thread sale solo cuando running es false. Como está detached,
-    // no podemos join(), pero el destructor de TcpServerHolder no se llamará
-    // hasta que el thread salga (en realidad nunca, pero está OK para un plugin).
-    // Para esperar limpiamente, podríamos usar std::jthread o un future.
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
 }
 

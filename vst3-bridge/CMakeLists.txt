@@ -39,6 +39,7 @@ add_library(${PROJECT_NAME} MODULE
     src/plugin.cpp
     src/protocol.cpp
     src/tcp_server.cpp
+    src/file_rpc_client.cpp
     src/handlers/transport.cpp
     src/handlers/meta.cpp
     src/handlers/mixer.cpp

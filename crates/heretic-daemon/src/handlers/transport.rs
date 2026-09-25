@@ -1,10 +1,16 @@
-//! Handlers transport — mirror del FLStudioMCP legacy (Fase 2).
+//! Handlers transport — map a las 133 actions del fLMCP Bridge v0.2.0.
 //!
-//! Cada método recibe un `serde_json::Value` con los params del request JSON-RPC
-//! y devuelve un `serde_json::Value` con el resultado.
-//!
-//! Si el método devuelve `Err(HereticError)`, el daemon lo convierte en
-//! una response JSON-RPC con `ok: false` + código de error.
+//! Mapeo de nuestros tools a actions del bridge:
+//! - `fl_ping`              → `meta.ping`
+//! - `fl_get_tempo`         → `transport.status` (extraer bpm)
+//! - `fl_set_tempo`         → `transport.set_tempo`
+//! - `fl_play`              → `transport.start`
+//! - `fl_stop`              → `transport.stop`
+//! - `fl_get_play_state`    → `transport.status` (extraer is_playing, is_recording)
+//! - `fl_get_song_position` → `transport.status` (extraer position_*)
+//! - `fl_set_song_position` → `transport.set_position` (con unit)
+//
+//! Fase 3: añadir el resto de las actions (mixer, channels, plugins, etc.)
 
 use std::sync::Arc;
 
@@ -24,9 +30,6 @@ impl Transport {
     }
 
     /// Dispatcher principal: matchea el nombre del método al handler apropiado.
-    ///
-    /// Devuelve `Err(HereticError::InvalidRequest)` si el método no es transport.
-    /// (Para Fase 3, los handlers no-transport vivirían en otros módulos.)
     pub async fn dispatch(&self, method: &str, params: Value) -> Result<Value> {
         match method {
             "ping" => self.ping().await,
@@ -48,128 +51,108 @@ impl Transport {
     // Handlers individuales
     // ============================================================
 
-    /// `ping` — eco del controller script + info del daemon.
+    /// `meta.ping` — info del bridge + FL.
     pub async fn ping(&self) -> Result<Value> {
         let info = self.bridge.ping().await?;
         Ok(json!({
             "pong": true,
+            "bridge_version": info.bridge_version,
             "fl_version": info.fl_version,
-            "protocol_version": info.protocol_version,
-            "raw": info.raw,
+            "uptime_sec": info.uptime_sec,
+            "script_dir": info.script_dir,
+            "raw": info,
         }))
     }
 
-    /// `health` — estado del bridge MIDI (heartbeat age, alive).
+    /// `health` — estado del bridge (qué transports están activos).
     pub async fn health(&self) -> Result<Value> {
-        let h = self.bridge.health().await;
+        let h = self.bridge.health();
+        // Verificar ping real (test que el bridge responde)
+        let ping_ok = self.bridge.ping().await.is_ok();
         Ok(json!({
-            "alive": h.alive,
-            "heartbeat_age_ms": h.heartbeat_age_ms,
-            "fl_version": h.fl_version,
+            "alive": ping_ok,
+            "primary": h.primary,
+            "fallback": h.fallback,
+            "primary_available": h.primary_available,
+            "fallback_available": h.fallback_available,
         }))
     }
 
-    /// `get_tempo` — BPM actual.
+    /// `transport.status` (extraer bpm).
     pub async fn get_tempo(&self) -> Result<Value> {
-        let bpm = self.bridge.get_tempo().await?;
-        Ok(json!({ "bpm": bpm }))
+        let status = self.bridge.transport_status().await?;
+        Ok(json!({ "bpm": status.bpm }))
     }
 
-    /// `set_tempo` — params: `{ "bpm": f64 }`.
+    /// `transport.set_tempo` — params: `{ "bpm": f64 }`.
     pub async fn set_tempo(&self, params: Value) -> Result<Value> {
         let bpm = params
             .get("bpm")
             .and_then(|v| v.as_f64())
             .ok_or_else(|| HereticError::InvalidRequest("set_tempo: missing bpm".into()))?;
-        let result = self.bridge.set_tempo(bpm).await?;
-        Ok(json!({ "bpm": result }))
+        let result_bpm = self.bridge.set_tempo(bpm).await?;
+        Ok(json!({ "bpm": result_bpm }))
     }
 
-    /// `play` — transport.start().
+    /// `transport.start`.
     pub async fn play(&self) -> Result<Value> {
         self.bridge.play().await?;
         Ok(json!({ "playing": true }))
     }
 
-    /// `stop` — transport.stop().
+    /// `transport.stop`.
     pub async fn stop(&self) -> Result<Value> {
         self.bridge.stop().await?;
         Ok(json!({ "playing": false }))
     }
 
-    /// `get_play_state` — playing + recording.
+    /// `transport.status` (extraer is_playing + is_recording).
     pub async fn get_play_state(&self) -> Result<Value> {
-        // FL controller script legacy no expone isRecording() en handlers básicos,
-        // solo isPlaying(). Devolvemos lo que tenemos.
-        let health = self.bridge.health().await;
-        // Para playing: usar fl_get_song_position o un campo adicional
-        // Por ahora: false (Fase 3+ implementará get_play_state con ambos flags)
+        let status = self.bridge.transport_status().await?;
         Ok(json!({
-            "playing": health.alive,  // proxy pobre — Fase 3 lo afina
-            "recording": false,
-            "alive": health.alive,
+            "playing": status.is_playing,
+            "recording": status.is_recording,
+            "bpm": status.bpm,
         }))
     }
 
-    /// `get_song_position` — posición actual.
+    /// `transport.status` (extraer position_*).
     pub async fn get_song_position(&self) -> Result<Value> {
-        let pos = self.bridge.get_song_position().await?;
+        let status = self.bridge.transport_status().await?;
         Ok(json!({
-            "position_ms": pos.position_ms,
-            "position_ticks": pos.position_ticks,
-            "position_beats": pos.position_beats,
-            "bpm": pos.bpm,
+            "position_ticks": status.position_ticks,
+            "position_bars": status.position_bars,
+            "position_seconds": status.position_seconds,
+            "bpm": status.bpm,
+            "loop_mode": status.loop_mode,
         }))
     }
 
-    /// `set_song_position` — params: `{ "ms": f64 }` o `{ "beats": f64 }` o `{ "ticks": i64 }`.
+    /// `transport.set_position` — params: `{ "position": f64, "unit": "bars"|"ms"|"seconds"|"ticks"|"steps" }`.
+    /// Default unit es "bars" (lo que el bridge asume).
     pub async fn set_song_position(&self, params: Value) -> Result<Value> {
-        if let Some(ms) = params.get("ms").and_then(|v| v.as_f64()) {
-            let pos = self.bridge.set_song_position_ms(ms).await?;
-            Ok(json!({
-                "position_ms": pos.position_ms,
-                "position_ticks": pos.position_ticks,
-                "position_beats": pos.position_beats,
-                "bpm": pos.bpm,
-            }))
-        } else if let Some(beats) = params.get("beats").and_then(|v| v.as_f64()) {
-            // Convertir beats → ms usando el BPM actual
-            let current = self.bridge.get_song_position().await?;
-            let ms = beats * 60000.0 / current.bpm;
-            let pos = self.bridge.set_song_position_ms(ms).await?;
-            Ok(json!({
-                "position_ms": pos.position_ms,
-                "position_ticks": pos.position_ticks,
-                "position_beats": pos.position_beats,
-                "bpm": pos.bpm,
-            }))
-        } else if let Some(ticks) = params.get("ticks").and_then(|v| v.as_i64()) {
-            // Convertir ticks → ms (96 ticks per beat en ppq default de FL)
-            let current = self.bridge.get_song_position().await?;
-            let ms = (ticks as f64 / 96.0) * 60000.0 / current.bpm;
-            let pos = self.bridge.set_song_position_ms(ms).await?;
-            Ok(json!({
-                "position_ms": pos.position_ms,
-                "position_ticks": pos.position_ticks,
-                "position_beats": pos.position_beats,
-                "bpm": pos.bpm,
-            }))
-        } else {
-            Err(HereticError::InvalidRequest(
-                "set_song_position: provide ms, beats, or ticks".into(),
-            ))
-        }
+        let position = params
+            .get("position")
+            .and_then(|v| v.as_f64())
+            .ok_or_else(|| {
+                HereticError::InvalidRequest("set_song_position: missing position".into())
+            })?;
+        let unit = params
+            .get("unit")
+            .and_then(|v| v.as_str())
+            .unwrap_or("bars");
+        let status = self.bridge.set_position(position, unit).await?;
+        Ok(json!({
+            "position_ticks": status.position_ticks,
+            "position_bars": status.position_bars,
+            "position_seconds": status.position_seconds,
+            "bpm": status.bpm,
+        }))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn dispatch_unknown_returns_error() {
-        // No podemos instanciar el Transport sin bridge real, pero podemos
-        // verificar el formato del error.
-        // (Test de integración requeriría FL corriendo)
-    }
+    // Tests de integración requieren fLMCP Bridge corriendo en FL Studio.
 }

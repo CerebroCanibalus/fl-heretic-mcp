@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
-description = "Bridge MIDI SysEx para FL Studio (controller script Python ↔ daemon Rust)"
+description = "Bridge al fLMCP Bridge de FL Studio (file-RPC + TCP JSON-RPC)"
 
 [dependencies]
 heretic-core       = { path = "../heretic-core" }
@@ -17,22 +17,11 @@ serde_json         = { workspace = true }
 thiserror          = { workspace = true }
 anyhow             = { workspace = true }
 tracing            = { workspace = true }
-rand               = { workspace = true }
-hex                = { workspace = true }
-base64             = { workspace = true }
 
-# MIDI — única dependencia nativa (bindings via libsane-rtmidi en Windows)
-midir              = "0.10"
-
+# File I/O
 [target.'cfg(windows)'.dependencies]
-# Nada extra en Windows — midir usa WinMM por defecto
-
-[target.'cfg(target_os = "linux")'.dependencies]
-# ALSA en Linux — midir ya lo trae opcionalmente
-
-[target.'cfg(target_os = "macos")'.dependencies]
-# CoreMIDI en macOS — midir ya lo trae opcionalmente
+tokio = { workspace = true }
 
 [dev-dependencies]
 tempfile   = "3.13"
-tokio      = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
+tokio      = { workspace = true, features = ["macros", "rt-multi-thread"] }
