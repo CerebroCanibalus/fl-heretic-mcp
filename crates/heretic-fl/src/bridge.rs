@@ -281,6 +281,16 @@ impl FlBridge {
     // ============================================================
 
     /// `meta.ping` — health check del bridge.
+    /// Health check rápido — devuelve true si el VST3 plugin responde.
+    pub async fn is_alive(&self) -> bool {
+        self.ping().await.is_ok()
+    }
+
+    /// Config del bridge (read-only).
+    pub fn config(&self) -> &BridgeConfig {
+        &self.inner.config
+    }
+
     pub async fn ping(&self) -> Result<FlVersionInfo> {
         let data = self.call("meta.ping", json!({})).await?;
         Ok(FlVersionInfo {

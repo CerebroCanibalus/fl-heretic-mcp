@@ -47,12 +47,7 @@ pub struct Config {
     pub pipe_name: String,
     pub token_path: PathBuf,
     pub audit_path: PathBuf,
-    /// Directorio del script fLMCP Bridge (donde está `device_FLStudioMCP.py`).
-    /// Default: `%USERPROFILE%\Documents\Image-Line\FL Studio\Settings\Hardware\fLMCP Bridge`.
-    pub script_dir: PathBuf,
-    /// Si true, intenta TCP antes que file-RPC.
-    pub try_tcp: bool,
-    /// Si true, verifica el bridge con meta.ping antes de aceptar clientes.
+    /// Si true, verifica el VST3 plugin con meta.ping antes de aceptar clientes.
     pub wait_for_bridge: bool,
 }
 
@@ -66,8 +61,6 @@ impl Config {
             audit_path: audit
                 .map(PathBuf::from)
                 .unwrap_or_else(AuditLog::default_path),
-            script_dir: heretic_fl::default_script_dir(),
-            try_tcp: true,
             wait_for_bridge: true,
         }
     }
@@ -91,7 +84,7 @@ pub fn run(
     tracing::info!("  pipe:       {}", config.pipe_name);
     tracing::info!("  token:      {}", config.token_path.display());
     tracing::info!("  audit:      {}", config.audit_path.display());
-    tracing::info!("  script_dir: {}", config.script_dir.display());
+    tracing::info!("  vst3 host:  127.0.0.1:{} (proxy TCP)", heretic_fl::DEFAULT_PORT);
 
     // Cargar token (crear si no existe)
     let store = TokenStore::new(config.token_path.clone());
@@ -125,29 +118,27 @@ async fn serve(
 ) -> Result<(), HereticError> {
     // 1. Crear bridge fLMCP (file-RPC + TCP)
     let bridge_config = BridgeConfig {
-        script_dir: config.script_dir.clone(),
-        try_tcp: config.try_tcp,
-        tcp_host: heretic_fl::DEFAULT_TCP_HOST.into(),
-        tcp_port: heretic_fl::DEFAULT_TCP_PORT,
+        host: heretic_fl::DEFAULT_HOST.into(),
+        port: heretic_fl::DEFAULT_PORT,
         timeout: std::time::Duration::from_secs(10),
     };
     let bridge = FlBridge::connect(bridge_config)
         .map_err(|e| HereticError::Other(format!("creando bridge fLMCP: {e}")))?;
-    tracing::info!("  bridge: {} + {}", bridge.health().primary, bridge.health().fallback);
+    tracing::info!("  bridge: TCP 127.0.0.1:{} (VST3 proxy)", bridge.config().port);
 
     if config.wait_for_bridge {
-        tracing::info!("verificando conexión al fLMCP Bridge (meta.ping)...");
+        tracing::info!("verificando conexión al VST3 plugin (meta.ping)...");
         match bridge.ping().await {
             Ok(info) => {
                 tracing::info!(
-                    "  fLMCP Bridge OK: bridge={} fl={} uptime={}s",
+                    "  VST3 OK: bridge={} fl={} uptime={}s",
                     info.bridge_version, info.fl_version, info.uptime_sec
                 );
             }
             Err(e) => {
-                tracing::error!("  fLMCP Bridge no responde: {e}");
+                tracing::error!("  VST3 no responde: {e}");
                 return Err(HereticError::Other(format!(
-                    "fLMCP Bridge no responde: {e}. ¿FL Studio está corriendo con el controller script instalado?"
+                    "VST3 no responde: {e}. ¿FL Studio está corriendo con el plugin 'FL Heretic Bridge' cargado?"
                 )));
             }
         }

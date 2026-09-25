@@ -64,17 +64,12 @@ impl Transport {
         }))
     }
 
-    /// `health` — estado del bridge (qué transports están activos).
+    /// `health` — estado del bridge.
     pub async fn health(&self) -> Result<Value> {
-        let h = self.bridge.health();
-        // Verificar ping real (test que el bridge responde)
-        let ping_ok = self.bridge.ping().await.is_ok();
+        let ping_ok = self.bridge.is_alive().await;
         Ok(json!({
             "alive": ping_ok,
-            "primary": h.primary,
-            "fallback": h.fallback,
-            "primary_available": h.primary_available,
-            "fallback_available": h.fallback_available,
+            "bridge": "vst3-tcp-proxy",
         }))
     }
 
@@ -124,7 +119,6 @@ impl Transport {
             "position_bars": status.position_bars,
             "position_seconds": status.position_seconds,
             "bpm": status.bpm,
-            "loop_mode": status.loop_mode,
         }))
     }
 
