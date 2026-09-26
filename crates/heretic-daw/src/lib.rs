@@ -35,9 +35,13 @@
 mod live_tests;
 
 pub mod actions;
+pub mod rescan;
 pub mod file_rpc;
 pub mod reaper;
+pub mod setup;
 
 pub use actions::{ACTION_GROUPS, ACTIONS};
 pub use file_rpc::{FileRpc, RpcError};
+pub use rescan::{rescan, RescanReport};
+pub use setup::{Catalog, InstallReport, Plugin, install, installed_plugins, vst3_dir};
 pub use reaper::{ReaperBridge, ReaperConfig};

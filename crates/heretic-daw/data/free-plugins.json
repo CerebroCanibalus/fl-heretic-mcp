@@ -1,0 +1,241 @@
+{
+  "$comment": [
+    "Catalogo curado de plugins VST3/CLAP gratuitos y libres, con su origen",
+    "verificable. Es VERSIONADO a proposito: instalar de un catalogo que cambia",
+    "sola rompia la reproducibilidad, que es justo lo que se quiere evitar.",
+    "",
+    "Campos:",
+    "  name        nombre corto, el que usa el LLM",
+    "  display     nombre real del plugin, para buscarlo en la lista de Reaper",
+    "  kind        instrument | effect | analyzer | sampler",
+    "  format      vst3 | clap",
+    "  source      url directa (fichero concreto) o 'github:<owner>/<repo>'",
+    "  asset       para source=github: el nombre del asset dentro de la release",
+    "  hash        sha256 esperado, vacio = no fijado (se avisa)",
+    "  license     como se puede usar",
+    "  replaces    que plugin de FL cubre de verdad, o null",
+    "  note        por que esta aqui",
+    "",
+    "Instalar es: descargar -> verificar -> copiar a la carpeta de VST3 del",
+    "usuario -> forzar re-scan de Reaper. Un VST3 es un bundle (una carpeta con",
+    "un .vst3 dentro), no un DLL suelto: eso lo hace automatizable, al",
+    "contrario del VSTi de FL Studio, que no exporta VSTPluginMain y necesita",
+    "un instalador propio."
+  ],
+  "version": 1,
+  "plugins": [
+    {
+      "name": "surge-xt",
+      "display": "Surge XT",
+      "kind": "instrument",
+      "format": "vst3",
+      "source": "manual",
+      "asset": "surge-xt-windows-x64.zip",
+      "hash": "",
+      "license": "GPL-3.0, open source",
+      "replaces": [
+        "Sytrus",
+        "Harmor",
+        "Morphine"
+      ],
+      "note": "MOTOR AUTOMATIZABLE, no automatico: la release de GitHub solo trae el manual; los binarios se descargan de surge-synthesizer.github.io. El mas potente de los libres, pero requiere descarga manual."
+    },
+    {
+      "name": "dexed",
+      "display": "Dexed",
+      "kind": "instrument",
+      "format": "vst3",
+      "source": "github:asb2m10/dexed",
+      "asset": "Dexed-*-win.zip",
+      "hash": "",
+      "license": "GPL-3.0, open source",
+      "replaces": [
+        "FL Keys",
+        "Sytrus (FM)"
+      ],
+      "note": "Emulacion de Yamaha DX7. Carga patches SysEx originales. Electricos, campanas, bajos FM."
+    },
+    {
+      "name": "odin-2",
+      "display": "Odin 2",
+      "kind": "instrument",
+      "format": "clap",
+      "source": "manual",
+      "hash": "",
+      "license": "BSD-3, open source",
+      "replaces": [
+        "Harmor",
+        "Fruity Bass"
+      ],
+      "note": "MOTOR AUTOMATIZABLE, no automatico: la descarga no esta en una URL estable (el sitio publica en /static/odin2/ con version cambiante). Descarga desde thewavewarden.com. Es CLAP, asi que Reaper lo carga, pero otros DAWs no siempre."
+    },
+    {
+      "name": "tunefish",
+      "display": "Tunefish",
+      "kind": "instrument",
+      "format": "vst3",
+      "source": "manual",
+      "hash": "",
+      "license": "open source",
+      "replaces": [],
+      "note": "MOTOR AUTOMATIZABLE, no automatico: descarga desde tunefish-synth.com. Sintesis aditiva en 10 KB, para cuando la CPU es el problema."
+    },
+    {
+      "name": "vital",
+      "display": "Vital",
+      "kind": "instrument",
+      "format": "vst3",
+      "source": "manual",
+      "hash": "",
+      "license": "Free tier (motor completo, 75 presets, 25 wavetables)",
+      "replaces": [
+        "FLEX",
+        "FL Keys",
+        "DrumSynth"
+      ],
+      "note": "MOTOR AUTOMATIZABLE, no automatico: requiere cuenta y descarga manual desde vital.audio. Para beatmaking cubre FLEX y el 808. El mejor sustituto de FLEX para lo que se ve en la plantilla."
+    },
+    {
+      "name": "spitfire-labs",
+      "display": "Spitfire LABS",
+      "kind": "sampler",
+      "format": "vst3",
+      "source": "manual",
+      "hash": "",
+      "license": "Free, registro requerido",
+      "replaces": [
+        "FLEX (parte orquestal)"
+      ],
+      "note": "MOTOR AUTOMATIZABLE, no automatico: descarga manual. Lo mas cercano a la libreria de contenido de FLEX. Si FLEX te servia para orquestas, aqui esta el equivalente gratis."
+    },
+    {
+      "name": "tdr-nova",
+      "display": "TDR Nova",
+      "kind": "effect",
+      "format": "vst3",
+      "source": "manual",
+      "hash": "",
+      "license": "Freeware, sin limite de tiempo",
+      "replaces": [
+        "Fruity Parametric EQ 2"
+      ],
+      "note": "EQ dinamica. Competencia directa de FabFilter Pro-Q. Descarga manual desde tokyodawn.net."
+    },
+    {
+      "name": "tdr-kotelnikov",
+      "display": "TDR Kotelnikov",
+      "kind": "effect",
+      "format": "vst3",
+      "source": "manual",
+      "hash": "",
+      "license": "Freeware",
+      "replaces": [
+        "Fruity Compressor",
+        "Fruity Limiter"
+      ],
+      "note": "Compresor de bus transparente. Descarga manual."
+    },
+    {
+      "name": "ott",
+      "display": "OTT",
+      "kind": "effect",
+      "format": "vst3",
+      "source": "manual",
+      "hash": "",
+      "license": "Freeware (Xfer Records)",
+      "replaces": [
+        "Fruity 3 Band EQ",
+        "Fruity Blood Overdrive"
+      ],
+      "note": "Multiband compressor clasico para excitacion paralela. Descarga manual."
+    },
+    {
+      "name": "valhalla-supermassive",
+      "display": "Valhalla Supermassive",
+      "kind": "effect",
+      "format": "vst3",
+      "source": "manual",
+      "hash": "",
+      "license": "Gratis desde 2025, antes de pago",
+      "replaces": [
+        "Fruity Reeverb 2",
+        "Fruity Delay 3"
+      ],
+      "note": "Reverb y delay. Descarga manual desde valhalladsp.com."
+    },
+    {
+      "name": "voxengo-span",
+      "display": "Voxengo SPAN",
+      "kind": "analyzer",
+      "format": "vst3",
+      "source": "manual",
+      "hash": "",
+      "license": "Freeware",
+      "replaces": [
+        "Fruity Parametric EQ 2 (modo espectro)"
+      ],
+      "note": "Analizador de espectro FFT. Imprescindible para mezclar con criterio. Descarga manual."
+    },
+    {
+      "name": "youlean-loudness",
+      "display": "Youlean Loudness Meter",
+      "kind": "analyzer",
+      "format": "vst3",
+      "source": "manual",
+      "hash": "",
+      "license": "Freeware",
+      "replaces": [],
+      "note": "Medidor LUFS. Para comprobar el master contra el target. Descarga manual."
+    },
+    {
+      "name": "mfreefx",
+      "display": "MFreeFXBundle",
+      "kind": "effect",
+      "format": "vst3",
+      "source": "manual",
+      "hash": "",
+      "license": "Freeware (MeldaProduction)",
+      "replaces": [
+        "Fruity parametric",
+        "Fruity flanger",
+        "Fruity phaser",
+        "Fruity chorus",
+        "Fruity distortion"
+      ],
+      "note": "Bundle enorme de efectos gratis. Cubre un montón de Fruity de golpe. Descarga manual."
+    }
+  ],
+  "sets": {
+    "base": {
+      "description": "Solo lo que se instala sin que nadie toque la GUI. NOTA: Reaper ya trae ReaEQ, ReaComp, ReaVerb, ReaDelay, ReaLimit, ReaGate, ReaPitch y 250 plugins de fabrica, asi que EQ, compresion, reverb y delay ya estan cubiertos sin instalar nada.",
+      "plugins": [
+        "dexed"
+      ]
+    },
+    "beats": {
+      "description": "Lo que usa la plantilla actual (808s y bajos). NOTA: 'vital' exige descarga manual, asi que se instala a mano. Para beatmaking es el sustituto real de FLEX.",
+      "plugins": [
+        "vital",
+        "dexed",
+        "surge-xt"
+      ]
+    },
+    "manual": {
+      "description": "Exigen descarga con cuenta o registro. Se listan, no se instalan solos.",
+      "plugins": [
+        "surge-xt",
+        "odin-2",
+        "tunefish",
+        "vital",
+        "spitfire-labs",
+        "tdr-nova",
+        "tdr-kotelnikov",
+        "ott",
+        "valhalla-supermassive",
+        "voxengo-span",
+        "youlean-loudness",
+        "mfreefx"
+      ]
+    }
+  }
+}

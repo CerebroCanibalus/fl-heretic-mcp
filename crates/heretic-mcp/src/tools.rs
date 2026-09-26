@@ -347,3 +347,139 @@ pub async fn daw_midi(
     }
     call(&format!("midi.{op}"), Value::Object(p))
 }
+
+// ============================================================================
+// 8. daw_setup
+// ============================================================================
+
+#[tool(description = "Manage the DAW's plugin catalog. op=list: the curated catalog of free/open VST3 and CLAP plugins, with what each one replaces in FL Studio and whether it can be installed automatically. op=installed: what is actually on disk right now. op=install: download and install one plugin by its short name (e.g. 'surge-xt'). op=provision: install a whole set at once ('base' is fully automatic, no clicking required). op=rescan: tell the DAW to re-scan its plugins. Plugins marked 'manual' need a download from their website with an account, so this tool reports them instead of pretending it can do it.")]
+pub async fn daw_setup(
+    op: String,
+    name: Option<String>,
+    set: Option<String>,
+    force: Option<bool>,
+) -> std::result::Result<Value, ToolError> {
+    let op = op.trim().to_ascii_lowercase();
+    let cat = heretic_daw::Catalog::bundled();
+
+    match op.as_str() {
+        "list" => {
+            let filtro = name.map(|n| n.to_ascii_lowercase());
+            let ps: Vec<Value> = cat
+                .plugins
+                .iter()
+                .filter(|p| {
+                    let mut ok = filtro.is_none();
+                    if let Some(f) = &filtro {
+                        ok = p.name.to_ascii_lowercase().contains(f)
+                            || p.kind.to_ascii_lowercase().contains(f)
+                            || p.replaces.iter().any(|r| r.to_ascii_lowercase().contains(f));
+                    }
+                    ok
+                })
+                .map(|p| {
+                    json!({
+                        "name": p.name,
+                        "display": p.display,
+                        "kind": p.kind,
+                        "format": p.format,
+                        "license": p.license,
+                        "reemplaza_a": p.replaces,
+                        "automatizable": p.is_automatable(),
+                        "nota": p.note,
+                    })
+                })
+                .collect();
+            Ok(json!({
+                "catalogo_version": cat.version,
+                "total": ps.len(),
+                "plugins": ps,
+                "sets": cat.sets.iter().map(|(k, v)| json!({
+                    "set": k,
+                    "description": v.description,
+                    "plugins": v.plugins,
+                })).collect::<Vec<_>>(),
+            }))
+        }
+        "installed" => {
+            let dir = heretic_daw::vst3_dir();
+            let hay = heretic_daw::installed_plugins(&dir);
+            let automatizables: Vec<&str> = cat
+                .plugins
+                .iter()
+                .filter(|p| p.is_automatable())
+                .map(|p| p.name.as_str())
+                .collect();
+            Ok(json!({
+                "carpeta": dir.display().to_string(),
+                "existe": dir.exists(),
+                "plugins_en_disco": hay,
+                "total": hay.len(),
+                "del_catalogo_faltan": automatizables.iter().filter(|n| {
+                    let p = cat.get(n).unwrap();
+                    let ext = if p.format == "clap" { "clap" } else { "vst3" };
+                    !hay.iter().any(|d| d.to_lowercase()
+                        .contains(&p.display.to_lowercase()) && d.to_lowercase().ends_with(ext))
+                }).collect::<Vec<_>>(),
+            }))
+        }
+        "install" => {
+            let n = name.ok_or_else(|| {
+                ToolError::invalid_params("daw_setup install necesita 'name' (ver daw_setup list)")
+            })?;
+            let r = heretic_daw::install(&cat, &n, force.unwrap_or(false))
+                .map_err(|e| ToolError::internal(format!("{e}")))?;
+            Ok(serde_json::to_value(r).unwrap_or(json!({})))
+        }
+        "provision" => {
+            let s = set.or(name).unwrap_or_else(|| "base".to_string());
+            let Some(def) = cat.set(&s) else {
+                return Err(ToolError::invalid_params(format!(
+                    "set desconocido: {s}. Disponibles: {:?}",
+                    cat.sets.keys().collect::<Vec<_>>()
+                )));
+            };
+            let mut reports = Vec::new();
+            let mut fallos = Vec::new();
+            for n in &def.plugins {
+                match heretic_daw::install(&cat, n, force.unwrap_or(false)) {
+                    Ok(r) => {
+                        if r.status == "instalado" {
+                            reports.push(serde_json::to_value(&r).unwrap_or(json!({})));
+                        } else {
+                            reports.push(serde_json::to_value(&r).unwrap_or(json!({})));
+                            if r.status == "manual" {
+                                fallos.push(r.display.clone());
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        fallos.push(format!("{n}: {e}"));
+                        reports.push(json!({ "name": n, "status": "error", "message": e.to_string() }));
+                    }
+                }
+            }
+            Ok(json!({
+                "set": s,
+                "description": def.description,
+                "resultados": reports,
+                "requieren_descarga_manual": fallos,
+                "siguiente_paso": "Ejecuta daw_setup rescan (o reinicia el DAW) para que los vea.",
+            }))
+        }
+        "rescan" => {
+            let cfg = heretic_daw::ReaperConfig::default();
+            let target = name.as_deref();
+            let r = heretic_daw::rescan(cfg.rpc, target).map_err(|e| {
+                ToolError::internal(format!(
+                    "{e}\n Si Reaper no muestra el plugin, reinicialo: hay builds en las \
+                     que el re-escaneo se aplaza al siguiente arranque."
+                ))
+            })?;
+            Ok(serde_json::to_value(r).unwrap_or(json!({})))
+        }
+        other => Err(ToolError::invalid_params(format!(
+            "op desconocido: {other}. Validas: list, installed, install, provision, rescan"
+        ))),
+    }
+}
