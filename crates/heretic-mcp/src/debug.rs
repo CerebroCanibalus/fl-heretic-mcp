@@ -237,7 +237,11 @@ fn instalar_guard() -> std::result::Result<bool, ToolError> {
 }
 
 /// Corre un fragmento Lua dentro de Reaper, protegido por `pcall`.
-async fn evaluar(code: &str) -> std::result::Result<Value, ToolError> {
+///
+/// Es la pieza que reutilizan `daw_master` y `daw_music`: medir la sonoridad o
+/// calcular una escala es llamar a la API cruda de Reaper, y esa API solo se
+/// alcanza desde dentro de Reaper.
+pub async fn lua(code: &str) -> std::result::Result<Value, ToolError> {
     instalar_guard()?;
     let dir = scripts_dir()?;
     std::fs::write(dir.join(PAYLOAD_NOMBRE), code)
@@ -461,7 +465,7 @@ pub async fn daw_debug(
                 )
             })?;
             let t0 = std::time::Instant::now();
-            match evaluar(&code).await {
+            match lua(&code).await {
                 Ok(v) => {
                     let ms = t0.elapsed().as_millis() as u64;
                     anotar("info", &format!("eval ok en {ms} ms: {}", primer_plano(&v)));

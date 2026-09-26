@@ -38,6 +38,7 @@
 #![deny(unsafe_code)]
 
 pub mod debug;
+pub mod master;
 pub mod tools;
 pub mod win;
 #[cfg(test)]

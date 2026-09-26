@@ -39,9 +39,11 @@ pub mod rescan;
 pub mod file_rpc;
 pub mod reaper;
 pub mod setup;
+pub mod wav;
 
 pub use actions::{ACTION_GROUPS, ACTIONS};
 pub use file_rpc::{FileRpc, RpcError};
 pub use rescan::{rescan, RescanReport};
 pub use setup::{Catalog, InstallReport, Plugin, install, installed_plugins, vst3_dir};
+pub use wav::{Senal, SENALES};
 pub use reaper::{ReaperBridge, ReaperConfig};
