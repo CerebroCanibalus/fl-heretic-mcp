@@ -33,3 +33,5 @@
 #![forbid(unsafe_code)]
 
 pub mod tools;
+#[cfg(test)]
+mod tools_tests;

@@ -1,41 +1,1035 @@
-/// Catalogo de acciones del bridge ReaScript, extraido del bridge REAL.
-///
-/// **Generado, no escrito a mano.** Se extrae de
-/// `%APPDATA%\\REAPER\\Scripts\\reaper_mcp_server.lua` con:
-/// ```text
-/// grep -oP 'function (\w+)\.(\w+)\s*\(' reaper_mcp_server.lua
-/// ```
-/// y se toma el segundo campo, que es la clave publica del handler.
-///
-/// Que se genere no es un detalle. La primera version de este catalogo
-/// se escribio a mano, con nombres como `transport.setTempo` y `track.create`
-/// con punto, y **ninguno existia**: el bridge responde `Unknown command:` y
-/// las tres primeras pruebas contra Reaper real fallaron por eso.
-///
-/// Trampa del naming: el prefijo va **duplicado**. El bridge declara
-/// `function fx.fx_add(p)` y la clave publica es `fx_add`, no `add`.
-/// Lo mismo con `midi.midi_insert_note` -> `midi_insert_note`.
-/// Cuando se actualice el bridge, hay que regenerar esto.
+//! Catalogo de acciones del bridge, con sus parametros.
+//!
+//! **GENERADO con `tools/gen_actions.py`. No editar a mano.**
+//!
+//! Se extrae del bridge real (`%APPDATA%\\REAPER\\Scripts\\reaper_mcp_server.lua`):
+//!
+//! ```text
+//! python tools/gen_actions.py
+//! ```
+//!
+//! Para cada handler se leen dos cosas del codigo, no de documentacion:
+//!
+//! - **params**: los campos que el handler lee de `p` (`p.bpm`, `p[x]`).
+//! - **required**: los que el propio handler rechaza si faltan, via
+//!   `return nil, 'Missing parameter: X'`.
+//!
+//! Importa que salga del codigo y no de un docstring: el bridge no tiene
+//! docstrings por handler, y **adivinar los parametros es el bug que mas
+//! caro salio en la etapa de FL Studio** (mandar `ms` cuando el daemon
+//! leia `position`). Reaper no avisa de un param desconocido: usa el valor
+//! por defecto y parece que funciono.
+//!
+//! Al actualizar el bridge, hay que regenerar esto.
+
+/// Una accion del bridge, con lo que se sabe de ella leyendo su codigo.
+#[derive(Debug, Clone, Copy)]
+pub struct ActionDoc {
+    /// Nombre publico, tal cual lo registra el bridge.
+    pub name: &'static str,
+    /// Modulo del bridge donde vive.
+    pub module: &'static str,
+    /// Params que el handler lee. Ninguno es opcional por defecto: el
+    /// bridge no avisa si sobra uno.
+    pub params: &'static [&'static str],
+    /// Params que el handler exige.
+    pub required: &'static [&'static str],
+}
+
+/// Documentacion de cada accion, indexada por nombre.
+pub static ACTION_DOCS: &[ActionDoc] = &[
+    ActionDoc {
+        name: "add_markers_batch",
+        module: "compose",
+        params: &["markers"],
+        required: &["markers"],
+    },
+    ActionDoc {
+        name: "analyze_score",
+        module: "compose",
+        params: &["create", "end_time", "envelope_name", "fx_index", "param_index", "start_time", "track_index", "tracks"],
+        required: &[],
+    },
+    ActionDoc {
+        name: "chops_create_virtual_slice",
+        module: "item",
+        params: &["fade_len_sec", "length_sec", "pitch_semis", "playrate", "source_item_index", "source_offset_sec", "target_position_sec", "target_track_index"],
+        required: &[],
+    },
+    ActionDoc {
+        name: "compose_arrangement",
+        module: "compose",
+        params: &["clear_existing", "tracks"],
+        required: &["tracks"],
+    },
+    ActionDoc {
+        name: "compose_ensure_tracks",
+        module: "compose",
+        params: &["max_track_index"],
+        required: &[],
+    },
+    ActionDoc {
+        name: "compose_single_track",
+        module: "compose",
+        params: &["clear_existing", "track_data"],
+        required: &["track_data"],
+    },
+    ActionDoc {
+        name: "configure_tracks",
+        module: "compose",
+        params: &["tracks"],
+        required: &["tracks"],
+    },
+    ActionDoc {
+        name: "edit_section",
+        module: "compose",
+        params: &["end_time", "mode", "start_time", "tracks", "trim_item"],
+        required: &["start_time/end_time", "tracks"],
+    },
+    ActionDoc {
+        name: "envelope_add_points",
+        module: "envelope",
+        params: &["points"],
+        required: &[],
+    },
+    ActionDoc {
+        name: "envelope_clear_range",
+        module: "envelope",
+        params: &["end_time", "start_time"],
+        required: &[],
+    },
+    ActionDoc {
+        name: "envelope_get_points",
+        module: "envelope",
+        params: &["max_results"],
+        required: &[],
+    },
+    ActionDoc {
+        name: "fx_add",
+        module: "fx",
+        params: &["fx_name"],
+        required: &["fx_name"],
+    },
+    ActionDoc {
+        name: "fx_disable",
+        module: "fx",
+        params: &[],
+        required: &[],
+    },
+    ActionDoc {
+        name: "fx_enable",
+        module: "fx",
+        params: &[],
+        required: &[],
+    },
+    ActionDoc {
+        name: "fx_get_chain",
+        module: "fx",
+        params: &[],
+        required: &[],
+    },
+    ActionDoc {
+        name: "fx_get_instrument",
+        module: "fx",
+        params: &[],
+        required: &[],
+    },
+    ActionDoc {
+        name: "fx_get_params",
+        module: "fx",
+        params: &["max_results"],
+        required: &[],
+    },
+    ActionDoc {
+        name: "fx_get_pin_mappings",
+        module: "fx",
+        params: &["fx_index"],
+        required: &["fx_index"],
+    },
+    ActionDoc {
+        name: "fx_get_preset",
+        module: "fx",
+        params: &[],
+        required: &[],
+    },
+    ActionDoc {
+        name: "fx_list_installed",
+        module: "fx",
+        params: &[],
+        required: &[],
+    },
+    ActionDoc {
+        name: "fx_move",
+        module: "fx",
+        params: &[],
+        required: &[],
+    },
+    ActionDoc {
+        name: "fx_navigate_preset",
+        module: "fx",
+        params: &[],
+        required: &[],
+    },
+    ActionDoc {
+        name: "fx_remove_batch",
+        module: "fx",
+        params: &["entries"],
+        required: &["entries"],
+    },
+    ActionDoc {
+        name: "fx_rename",
+        module: "fx",
+        params: &["new_name"],
+        required: &["new_name"],
+    },
+    ActionDoc {
+        name: "fx_scan_params",
+        module: "fx",
+        params: &["max_params"],
+        required: &[],
+    },
+    ActionDoc {
+        name: "fx_set_param",
+        module: "fx",
+        params: &[],
+        required: &[],
+    },
+    ActionDoc {
+        name: "fx_set_param_by_name",
+        module: "fx",
+        params: &["param_name", "value"],
+        required: &["param_name", "value"],
+    },
+    ActionDoc {
+        name: "fx_set_preset",
+        module: "fx",
+        params: &["include_params", "preset_name"],
+        required: &["preset_name"],
+    },
+    ActionDoc {
+        name: "fx_show_ui",
+        module: "fx",
+        params: &[],
+        required: &[],
+    },
+    ActionDoc {
+        name: "get_track_instruments",
+        module: "compose",
+        params: &[],
+        required: &[],
+    },
+    ActionDoc {
+        name: "item_clone_to_position",
+        module: "item",
+        params: &["source_item_index", "target_position_sec", "target_track_index"],
+        required: &["source_item_index", "target_position_sec"],
+    },
+    ActionDoc {
+        name: "item_create_midi",
+        module: "item",
+        params: &["length", "position", "track_index"],
+        required: &[],
+    },
+    ActionDoc {
+        name: "item_delete",
+        module: "item",
+        params: &["item_index"],
+        required: &[],
+    },
+    ActionDoc {
+        name: "item_duplicate",
+        module: "item",
+        params: &["count", "item_index", "spacing_sec"],
+        required: &["item_index"],
+    },
+    ActionDoc {
+        name: "item_get_all",
+        module: "item",
+        params: &["max_results", "track_index"],
+        required: &[],
+    },
+    ActionDoc {
+        name: "item_get_info",
+        module: "item",
+        params: &["item_index"],
+        required: &[],
+    },
+    ActionDoc {
+        name: "item_get_source_info",
+        module: "item",
+        params: &["item_index"],
+        required: &["item_index"],
+    },
+    ActionDoc {
+        name: "item_insert_media",
+        module: "item",
+        params: &["path", "position", "track_index"],
+        required: &["path"],
+    },
+    ActionDoc {
+        name: "item_move",
+        module: "item",
+        params: &["item_index", "new_position"],
+        required: &["new_position"],
+    },
+    ActionDoc {
+        name: "item_move_to_track",
+        module: "item",
+        params: &["dest_track_index", "item_index"],
+        required: &[],
+    },
+    ActionDoc {
+        name: "item_select",
+        module: "item",
+        params: &["exclusive", "item_index", "selected"],
+        required: &[],
+    },
+    ActionDoc {
+        name: "item_set_fade",
+        module: "item",
+        params: &["fade_in", "fade_out", "item_index"],
+        required: &[],
+    },
+    ActionDoc {
+        name: "item_set_length",
+        module: "item",
+        params: &["item_index", "length"],
+        required: &[],
+    },
+    ActionDoc {
+        name: "item_set_mute",
+        module: "item",
+        params: &["item_index", "mute"],
+        required: &[],
+    },
+    ActionDoc {
+        name: "item_set_volume",
+        module: "item",
+        params: &["item_index", "volume_db"],
+        required: &["volume_db"],
+    },
+    ActionDoc {
+        name: "item_split",
+        module: "item",
+        params: &["item_index", "position"],
+        required: &["position"],
+    },
+    ActionDoc {
+        name: "item_split_at_positions",
+        module: "item",
+        params: &["item_index", "positions"],
+        required: &["item_index", "positions"],
+    },
+    ActionDoc {
+        name: "item_split_at_transients",
+        module: "item",
+        params: &["item_index"],
+        required: &["item_index"],
+    },
+    ActionDoc {
+        name: "item_take_add",
+        module: "item",
+        params: &["item_index"],
+        required: &[],
+    },
+    ActionDoc {
+        name: "item_take_delete_active",
+        module: "item",
+        params: &["item_index"],
+        required: &[],
+    },
+    ActionDoc {
+        name: "item_take_list",
+        module: "item",
+        params: &["item_index"],
+        required: &[],
+    },
+    ActionDoc {
+        name: "item_take_set_active",
+        module: "item",
+        params: &["item_index", "take_index"],
+        required: &[],
+    },
+    ActionDoc {
+        name: "items_apply",
+        module: "item",
+        params: &["entries"],
+        required: &["entries"],
+    },
+    ActionDoc {
+        name: "marker_add",
+        module: "marker",
+        params: &["color_b", "color_g", "color_r", "name", "position"],
+        required: &["position"],
+    },
+    ActionDoc {
+        name: "marker_add_region",
+        module: "marker",
+        params: &["color_b", "color_g", "color_r", "end", "name", "start"],
+        required: &["start/end"],
+    },
+    ActionDoc {
+        name: "marker_delete",
+        module: "marker",
+        params: &["marker_index"],
+        required: &["marker_index"],
+    },
+    ActionDoc {
+        name: "marker_edit",
+        module: "marker",
+        params: &["marker_index", "name", "position"],
+        required: &["marker_index"],
+    },
+    ActionDoc {
+        name: "marker_get_all",
+        module: "marker",
+        params: &["max_results"],
+        required: &[],
+    },
+    ActionDoc {
+        name: "marker_go_to",
+        module: "marker",
+        params: &["marker_number"],
+        required: &["marker_number"],
+    },
+    ActionDoc {
+        name: "markers_apply",
+        module: "marker",
+        params: &["entries"],
+        required: &["entries"],
+    },
+    ActionDoc {
+        name: "midi_count_events",
+        module: "midi",
+        params: &[],
+        required: &[],
+    },
+    ActionDoc {
+        name: "midi_delete_all_notes",
+        module: "midi",
+        params: &[],
+        required: &[],
+    },
+    ActionDoc {
+        name: "midi_delete_cc",
+        module: "midi",
+        params: &["cc_index"],
+        required: &["cc_index"],
+    },
+    ActionDoc {
+        name: "midi_delete_note",
+        module: "midi",
+        params: &["note_index"],
+        required: &["note_index"],
+    },
+    ActionDoc {
+        name: "midi_get_note_names",
+        module: "midi",
+        params: &[],
+        required: &[],
+    },
+    ActionDoc {
+        name: "midi_get_notes",
+        module: "midi",
+        params: &["max_results"],
+        required: &[],
+    },
+    ActionDoc {
+        name: "midi_humanize",
+        module: "midi",
+        params: &["timing_ms", "velocity_amount"],
+        required: &[],
+    },
+    ActionDoc {
+        name: "midi_insert_cc",
+        module: "midi",
+        params: &["cc_number", "cc_value", "channel", "position"],
+        required: &["position/channel/cc_number/cc_value"],
+    },
+    ActionDoc {
+        name: "midi_insert_note",
+        module: "midi",
+        params: &["channel", "end_position", "pitch", "start_position", "velocity"],
+        required: &["channel/pitch/velocity", "start_position/end_position"],
+    },
+    ActionDoc {
+        name: "midi_insert_notes_batch",
+        module: "midi",
+        params: &["notes"],
+        required: &["notes"],
+    },
+    ActionDoc {
+        name: "midi_insert_program_change",
+        module: "midi",
+        params: &["bank_lsb", "bank_msb", "channel", "position", "program"],
+        required: &["position/channel/program"],
+    },
+    ActionDoc {
+        name: "midi_list_programs",
+        module: "midi",
+        params: &[],
+        required: &[],
+    },
+    ActionDoc {
+        name: "midi_quantize",
+        module: "midi",
+        params: &["grid_seconds", "strength"],
+        required: &[],
+    },
+    ActionDoc {
+        name: "midi_select_notes",
+        module: "midi",
+        params: &["select_all"],
+        required: &[],
+    },
+    ActionDoc {
+        name: "midi_set_item_extents",
+        module: "midi",
+        params: &["end_qn", "start_qn"],
+        required: &["start_qn/end_qn"],
+    },
+    ActionDoc {
+        name: "midi_set_note",
+        module: "midi",
+        params: &["channel", "end_position", "note_index", "pitch", "start_position", "velocity"],
+        required: &["note_index"],
+    },
+    ActionDoc {
+        name: "midi_sort",
+        module: "midi",
+        params: &[],
+        required: &[],
+    },
+    ActionDoc {
+        name: "project_backup",
+        module: "project",
+        params: &["path"],
+        required: &["path"],
+    },
+    ActionDoc {
+        name: "project_export_audio",
+        module: "project",
+        params: &["format_code", "render_dir", "render_pattern", "source"],
+        required: &["format_code", "render_dir", "render_pattern"],
+    },
+    ActionDoc {
+        name: "project_get_change_count",
+        module: "project",
+        params: &[],
+        required: &[],
+    },
+    ActionDoc {
+        name: "project_get_info",
+        module: "project",
+        params: &[],
+        required: &[],
+    },
+    ActionDoc {
+        name: "project_get_metadata",
+        module: "project",
+        params: &[],
+        required: &[],
+    },
+    ActionDoc {
+        name: "project_get_notes",
+        module: "project",
+        params: &[],
+        required: &[],
+    },
+    ActionDoc {
+        name: "project_get_notes_info",
+        module: "project",
+        params: &[],
+        required: &[],
+    },
+    ActionDoc {
+        name: "project_get_overview",
+        module: "project",
+        params: &[],
+        required: &[],
+    },
+    ActionDoc {
+        name: "project_main_action",
+        module: "project",
+        params: &["command_id"],
+        required: &["command_id"],
+    },
+    ActionDoc {
+        name: "project_new",
+        module: "project",
+        params: &[],
+        required: &[],
+    },
+    ActionDoc {
+        name: "project_open",
+        module: "project",
+        params: &["path"],
+        required: &["path"],
+    },
+    ActionDoc {
+        name: "project_redo",
+        module: "project",
+        params: &["steps"],
+        required: &[],
+    },
+    ActionDoc {
+        name: "project_save",
+        module: "project",
+        params: &[],
+        required: &[],
+    },
+    ActionDoc {
+        name: "project_save_as",
+        module: "project",
+        params: &["path"],
+        required: &["path"],
+    },
+    ActionDoc {
+        name: "project_set_grid",
+        module: "project",
+        params: &["grid_division"],
+        required: &["grid_division"],
+    },
+    ActionDoc {
+        name: "project_set_metadata",
+        module: "project",
+        params: &[],
+        required: &[],
+    },
+    ActionDoc {
+        name: "project_set_notes",
+        module: "project",
+        params: &["notes"],
+        required: &["notes"],
+    },
+    ActionDoc {
+        name: "project_set_notes_info",
+        module: "project",
+        params: &[],
+        required: &[],
+    },
+    ActionDoc {
+        name: "project_set_ripple_mode",
+        module: "project",
+        params: &["mode"],
+        required: &[],
+    },
+    ActionDoc {
+        name: "project_undo",
+        module: "project",
+        params: &["steps"],
+        required: &[],
+    },
+    ActionDoc {
+        name: "project_undo_group",
+        module: "project",
+        params: &[],
+        required: &[],
+    },
+    ActionDoc {
+        name: "script_list",
+        module: "script",
+        params: &["filter"],
+        required: &[],
+    },
+    ActionDoc {
+        name: "script_read_result",
+        module: "script",
+        params: &[],
+        required: &[],
+    },
+    ActionDoc {
+        name: "script_run_start",
+        module: "script",
+        params: &["script_path"],
+        required: &["script_path"],
+    },
+    ActionDoc {
+        name: "selection_deselect_all_items",
+        module: "selection",
+        params: &[],
+        required: &[],
+    },
+    ActionDoc {
+        name: "selection_deselect_all_tracks",
+        module: "selection",
+        params: &[],
+        required: &[],
+    },
+    ActionDoc {
+        name: "selection_get_selected_items",
+        module: "selection",
+        params: &[],
+        required: &[],
+    },
+    ActionDoc {
+        name: "selection_get_selected_tracks",
+        module: "selection",
+        params: &[],
+        required: &[],
+    },
+    ActionDoc {
+        name: "selection_get_time",
+        module: "selection",
+        params: &[],
+        required: &[],
+    },
+    ActionDoc {
+        name: "selection_select_all_items",
+        module: "selection",
+        params: &[],
+        required: &[],
+    },
+    ActionDoc {
+        name: "selection_select_all_tracks",
+        module: "selection",
+        params: &[],
+        required: &[],
+    },
+    ActionDoc {
+        name: "selection_set_loop",
+        module: "selection",
+        params: &["end", "start"],
+        required: &["start/end"],
+    },
+    ActionDoc {
+        name: "selection_set_time",
+        module: "selection",
+        params: &["end", "start"],
+        required: &["start/end"],
+    },
+    ActionDoc {
+        name: "send_create",
+        module: "send",
+        params: &["dest_track", "midi_dest_channel", "midi_source_channel", "source_track"],
+        required: &["source_track/dest_track"],
+    },
+    ActionDoc {
+        name: "send_get_all",
+        module: "send",
+        params: &[],
+        required: &[],
+    },
+    ActionDoc {
+        name: "send_get_routing_diagram",
+        module: "send",
+        params: &["item_index", "track_index"],
+        required: &["item_index"],
+    },
+    ActionDoc {
+        name: "send_remove",
+        module: "send",
+        params: &["send_index"],
+        required: &[],
+    },
+    ActionDoc {
+        name: "send_set_midi_channel",
+        module: "send",
+        params: &["midi_dest_channel", "midi_source_channel", "send_index"],
+        required: &["midi_dest_channel", "midi_source_channel", "send_index"],
+    },
+    ActionDoc {
+        name: "send_set_mute",
+        module: "send",
+        params: &["mute", "send_index"],
+        required: &[],
+    },
+    ActionDoc {
+        name: "send_set_pan",
+        module: "send",
+        params: &["pan", "send_index"],
+        required: &["pan"],
+    },
+    ActionDoc {
+        name: "send_set_volume",
+        module: "send",
+        params: &["send_index", "volume_db"],
+        required: &["volume_db"],
+    },
+    ActionDoc {
+        name: "setup_effect_bus",
+        module: "compose",
+        params: &["bus_color", "bus_name", "bus_position", "bus_volume_db", "fx_chain", "sends_from"],
+        required: &["bus_name"],
+    },
+    ActionDoc {
+        name: "setup_fx_chain",
+        module: "compose",
+        params: &["tracks"],
+        required: &["tracks"],
+    },
+    ActionDoc {
+        name: "setup_master_chain",
+        module: "compose",
+        params: &["clean", "clean_names", "fx_chain"],
+        required: &[],
+    },
+    ActionDoc {
+        name: "setup_routing",
+        module: "compose",
+        params: &["sends"],
+        required: &["sends"],
+    },
+    ActionDoc {
+        name: "setup_sidechain",
+        module: "compose",
+        params: &["amount", "attack_ms", "compressor_name", "fx_index", "ratio", "release_ms", "send_db", "source_track", "target_track", "threshold_db"],
+        required: &["source_track/target_track"],
+    },
+    ActionDoc {
+        name: "take_set_pitch",
+        module: "item",
+        params: &["item_index", "semitones", "take_index"],
+        required: &["item_index", "semitones"],
+    },
+    ActionDoc {
+        name: "take_set_playrate",
+        module: "item",
+        params: &["item_index", "preserve_pitch", "rate"],
+        required: &["item_index", "rate"],
+    },
+    ActionDoc {
+        name: "take_set_reversed",
+        module: "item",
+        params: &["item_index"],
+        required: &["item_index"],
+    },
+    ActionDoc {
+        name: "tempo_add_marker",
+        module: "tempo",
+        params: &["bpm", "linear", "position", "time_sig_denom", "time_sig_num"],
+        required: &[],
+    },
+    ActionDoc {
+        name: "tempo_clear_all",
+        module: "tempo",
+        params: &[],
+        required: &[],
+    },
+    ActionDoc {
+        name: "tempo_delete_marker",
+        module: "tempo",
+        params: &["index"],
+        required: &[],
+    },
+    ActionDoc {
+        name: "tempo_list_markers",
+        module: "tempo",
+        params: &[],
+        required: &[],
+    },
+    ActionDoc {
+        name: "track_create",
+        module: "track",
+        params: &["index", "name"],
+        required: &[],
+    },
+    ActionDoc {
+        name: "track_delete_batch",
+        module: "track",
+        params: &["entries"],
+        required: &["entries"],
+    },
+    ActionDoc {
+        name: "track_freeze",
+        module: "track",
+        params: &[],
+        required: &[],
+    },
+    ActionDoc {
+        name: "track_get_all",
+        module: "track",
+        params: &[],
+        required: &[],
+    },
+    ActionDoc {
+        name: "track_get_info",
+        module: "track",
+        params: &[],
+        required: &[],
+    },
+    ActionDoc {
+        name: "track_get_mixer_state",
+        module: "track",
+        params: &[],
+        required: &[],
+    },
+    ActionDoc {
+        name: "track_get_peak",
+        module: "track",
+        params: &[],
+        required: &[],
+    },
+    ActionDoc {
+        name: "track_get_state_chunk",
+        module: "track",
+        params: &[],
+        required: &[],
+    },
+    ActionDoc {
+        name: "track_rename",
+        module: "track",
+        params: &["name"],
+        required: &["name"],
+    },
+    ActionDoc {
+        name: "track_select",
+        module: "track",
+        params: &["exclusive", "selected"],
+        required: &[],
+    },
+    ActionDoc {
+        name: "track_set_color",
+        module: "track",
+        params: &["b", "g", "r"],
+        required: &[],
+    },
+    ActionDoc {
+        name: "track_set_folder",
+        module: "track",
+        params: &["folder_depth"],
+        required: &["folder_depth"],
+    },
+    ActionDoc {
+        name: "track_set_input",
+        module: "track",
+        params: &["input_index"],
+        required: &["input_index"],
+    },
+    ActionDoc {
+        name: "track_set_mute",
+        module: "track",
+        params: &["mute"],
+        required: &[],
+    },
+    ActionDoc {
+        name: "track_set_pan",
+        module: "track",
+        params: &["pan"],
+        required: &["pan"],
+    },
+    ActionDoc {
+        name: "track_set_record_arm",
+        module: "track",
+        params: &["arm"],
+        required: &[],
+    },
+    ActionDoc {
+        name: "track_set_solo",
+        module: "track",
+        params: &["solo"],
+        required: &[],
+    },
+    ActionDoc {
+        name: "track_set_state_chunk",
+        module: "track",
+        params: &["chunk"],
+        required: &[],
+    },
+    ActionDoc {
+        name: "track_set_volume",
+        module: "track",
+        params: &["volume_db"],
+        required: &["volume_db"],
+    },
+    ActionDoc {
+        name: "track_unfreeze",
+        module: "track",
+        params: &[],
+        required: &[],
+    },
+    ActionDoc {
+        name: "transport_get_state",
+        module: "transport",
+        params: &[],
+        required: &[],
+    },
+    ActionDoc {
+        name: "transport_pause",
+        module: "transport",
+        params: &[],
+        required: &[],
+    },
+    ActionDoc {
+        name: "transport_play",
+        module: "transport",
+        params: &[],
+        required: &[],
+    },
+    ActionDoc {
+        name: "transport_record",
+        module: "transport",
+        params: &[],
+        required: &[],
+    },
+    ActionDoc {
+        name: "transport_set_bpm",
+        module: "transport",
+        params: &["bpm"],
+        required: &["bpm"],
+    },
+    ActionDoc {
+        name: "transport_set_playrate",
+        module: "transport",
+        params: &["rate"],
+        required: &["rate"],
+    },
+    ActionDoc {
+        name: "transport_set_position",
+        module: "transport",
+        params: &["seconds"],
+        required: &["seconds"],
+    },
+    ActionDoc {
+        name: "transport_set_time_signature",
+        module: "transport",
+        params: &["denominator", "numerator"],
+        required: &["numerator/denominator"],
+    },
+    ActionDoc {
+        name: "transport_stop",
+        module: "transport",
+        params: &[],
+        required: &[],
+    },
+    ActionDoc {
+        name: "transport_toggle_metronome",
+        module: "transport",
+        params: &[],
+        required: &[],
+    },
+    ActionDoc {
+        name: "transport_toggle_repeat",
+        module: "transport",
+        params: &[],
+        required: &[],
+    },
+    ActionDoc {
+        name: "wipe_all_midi",
+        module: "compose",
+        params: &["tracks"],
+        required: &[],
+    },
+];
+
+/// Buscar la documentacion de una accion.
+pub fn doc_of(name: &str) -> Option<&'static ActionDoc> {
+    ACTION_DOCS.iter().find(|d| d.name == name)
+}
+
+/// Nombres de todas las acciones.
 pub const ACTIONS: &[&str] = &[
-    // add (1)
     "add_markers_batch",
-    // analyze (1)
     "analyze_score",
-    // chops (1)
     "chops_create_virtual_slice",
-    // compose (3)
     "compose_arrangement",
     "compose_ensure_tracks",
     "compose_single_track",
-    // configure (1)
     "configure_tracks",
-    // edit (1)
     "edit_section",
-    // envelope (3)
     "envelope_add_points",
     "envelope_clear_range",
     "envelope_get_points",
-    // fx (18)
     "fx_add",
     "fx_disable",
     "fx_enable",
@@ -54,9 +1048,7 @@ pub const ACTIONS: &[&str] = &[
     "fx_set_param_by_name",
     "fx_set_preset",
     "fx_show_ui",
-    // get (1)
     "get_track_instruments",
-    // item (22)
     "item_clone_to_position",
     "item_create_midi",
     "item_delete",
@@ -79,18 +1071,14 @@ pub const ACTIONS: &[&str] = &[
     "item_take_delete_active",
     "item_take_list",
     "item_take_set_active",
-    // items (1)
     "items_apply",
-    // marker (6)
     "marker_add",
     "marker_add_region",
     "marker_delete",
     "marker_edit",
     "marker_get_all",
     "marker_go_to",
-    // markers (1)
     "markers_apply",
-    // midi (17)
     "midi_count_events",
     "midi_delete_all_notes",
     "midi_delete_cc",
@@ -108,7 +1096,6 @@ pub const ACTIONS: &[&str] = &[
     "midi_set_item_extents",
     "midi_set_note",
     "midi_sort",
-    // project (21)
     "project_backup",
     "project_export_audio",
     "project_get_change_count",
@@ -130,11 +1117,9 @@ pub const ACTIONS: &[&str] = &[
     "project_set_ripple_mode",
     "project_undo",
     "project_undo_group",
-    // script (3)
     "script_list",
     "script_read_result",
     "script_run_start",
-    // selection (9)
     "selection_deselect_all_items",
     "selection_deselect_all_tracks",
     "selection_get_selected_items",
@@ -144,7 +1129,6 @@ pub const ACTIONS: &[&str] = &[
     "selection_select_all_tracks",
     "selection_set_loop",
     "selection_set_time",
-    // send (8)
     "send_create",
     "send_get_all",
     "send_get_routing_diagram",
@@ -153,22 +1137,18 @@ pub const ACTIONS: &[&str] = &[
     "send_set_mute",
     "send_set_pan",
     "send_set_volume",
-    // setup (5)
     "setup_effect_bus",
     "setup_fx_chain",
     "setup_master_chain",
     "setup_routing",
     "setup_sidechain",
-    // take (3)
     "take_set_pitch",
     "take_set_playrate",
     "take_set_reversed",
-    // tempo (4)
     "tempo_add_marker",
     "tempo_clear_all",
     "tempo_delete_marker",
     "tempo_list_markers",
-    // track (20)
     "track_create",
     "track_delete_batch",
     "track_freeze",
@@ -189,7 +1169,6 @@ pub const ACTIONS: &[&str] = &[
     "track_set_state_chunk",
     "track_set_volume",
     "track_unfreeze",
-    // transport (11)
     "transport_get_state",
     "transport_pause",
     "transport_play",
@@ -201,7 +1180,6 @@ pub const ACTIONS: &[&str] = &[
     "transport_stop",
     "transport_toggle_metronome",
     "transport_toggle_repeat",
-    // wipe (1)
     "wipe_all_midi",
 ];
 

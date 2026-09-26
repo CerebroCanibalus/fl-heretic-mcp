@@ -9,9 +9,12 @@
 Un servidor MCP en Rust que deja que un agente IA controle una DAW entera:
 crear proyectos, pistas, meter plugins, escribir MIDI, mezclar, renderizar.
 
-**Estado: andamiaje compilando, sin bridge configurado todavía.** Reaper está
-instalado pero el ReaScript bridge aún no se ha probado contra el DAW real.
-Eso es lo primero.
+**Estado: el transporte funciona contra Reaper real.** 5/5 tests live
+verdes: se escribe el tempo, se relee, se crean y borran pistas. El bridge
+Lua está instalado y se autostartea.
+
+Lo que no hay todavía: el FL Studio VSTi cargado en Reaper, y el E2E completo
+a través del MCP.
 
 **Historial:** este repo empezó siendo `FLHereticMCP`. El trabajo de FL Studio
 está completo en `0930996` y el pivot a Reaper en `493f850`. Nada se perdió.
@@ -187,6 +190,53 @@ Clonados, en `.gitignore` (material de referencia, no código nuestro):
 | shiehn/total-reaper-mcp | 600+ | 8 semanas | Cobertura casi total, DSL natural, bridge Lua único |
 | T-Rzeznik/reaper-mcp | 55 | 2 meses | Bridge TCP propio, `Undo_BeginBlock` por operación, prefijo `reaper_`. Diseño más limpio |
 
+## 7b. El catálogo se genera del bridge, no se escribe
+
+`tools/gen_actions.py` produce `crates/heretic-daw/src/actions.rs` leyendo el
+bridge real (`%APPDATA%\REAPER\Scripts\reaper_mcp_server.lua`).
+
+Por cada handler saca dos cosas, y las dos **del código**, no de documentación:
+
+- **params**: los campos que el handler lee de `p` (`p.bpm`, `p["x"]`).
+- **required**: los que el propio handler rechaza si faltan, vía
+  `return nil, "Missing parameter: X"`.
+
+**162 acciones, 24 grupos.** Verificado en vivo:
+
+```text
+daw_catalog(domain=midi) -> 17 acciones
+  midi_delete_cc        required=['cc_index']
+  midi_delete_note      required=['note_index']
+  daw_project(info)     -> bpm 120, sample_rate 44100, 0 pistas
+  daw_health            -> bridge=ok
+```
+
+Que salga del código importa por una razón concreta: **el bridge no tiene
+docstrings por handler**, y adivinar los parámetros es el bug que más caro
+salió en FL (mandar `ms` cuando el daemon leía `position`). Reaper no avisa de
+un parámetro desconocido: usa el valor por defecto y parece que funcionó.
+
+### Trampas del naming del bridge
+
+| trampa | ejemplo |
+|---|---|
+| El prefijo va **duplicado** | `function fx.fx_add(p)` → clave pública `fx_add` |
+| Separador `_`, no punto | `transport_set_bpm`, no `transport.setTempo` |
+| Verbos en pasado | `track_create`, `project_get_info` |
+
+`crates/heretic-mcp/src/tools_tests.rs` ata las acciones que usan las tools al
+catálogo generado, para que un nombre inventado falle en `cargo test` y no
+tres horas después contra Reaper. Ya atrapó uno: `project_get_paths`, que no
+existe (es `project_get_metadata`).
+
+### Parámetros que el bridge exige de otra forma
+
+Descubiertos porque da error, no por leerlo:
+
+- `track_delete_batch` quiere `entries`, y cada entry es un **objeto**:
+  `{"track_index": 3}`. Con un índice suelto responde
+  `Entry must be an object` y no borra nada.
+
 ## 8. Decisiones
 
 | Decisión | Por qué |
@@ -205,19 +255,19 @@ Clonados, en `.gitignore` (material de referencia, no código nuestro):
 - [x] Reaper 7.80 instalado
 - [x] 3 MCPs clonados en `reference/` y analizados (coste real medido)
 - [x] Andamiaje `heretic-daw` con file-RPC (9/9 tests)
-- [x] 7 tools MCP compilando
+- [x] 7 tools MCP compilando, verificadas contra Reaper real
 - [x] Repo renombrado a `daw-heretic-mcp`
+- [x] Bridge Lua instalado y autostarteando (`__startup.lua`)
+- [x] 162 acciones **generadas** del bridge, con params y obligatorios
+- [x] Tests que atan las tools al catálogo generado
+- [x] MCP de FL Studio y magda desconfigurados de opencode
 
 ### Pendiente, por orden
-1. [ ] **Configurar el bridge Lua dentro de Reaper y comprobar que file-RPC
-       responde de verdad.** Sin esto, `heretic-daw` es código sin probar
-       contra el DAW. Ese fue exactamente el error con FL.
-2. [ ] E2E: script que mande una tool por el MCP y verifique contra Reaper real
-3. [ ] **FL Studio VSTi en Reaper** para tener FLEX
-4. [ ] `daw_catalog` completo: las 181 acciones con sus params, generadas del
-       bridge real (no escritas a mano, que es como aparecen los bugs)
-5. [ ] Installer automático
-6. [ ] Decidir qué queda de `heretic-core` (el audit log pasa de "seguridad"
+1. [ ] **FL Studio VSTi en Reaper** para tener FLEX. Es lo que decide si esto
+       sirve para algo: sin los sounds, es un DAW vacío
+2. [ ] E2E completo por el MCP (ya funciona a mano, falta el test)
+3. [ ] Installer automático: bridge + `__startup.lua` + config de opencode
+4. [ ] Decidir qué queda de `heretic-core` (el audit log pasa de "seguridad"
        a "observabilidad": qué le cambió el agente a mi DAW)
 
 ## 10. Reglas para futuras sesiones

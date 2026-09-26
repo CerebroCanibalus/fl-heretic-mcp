@@ -81,7 +81,17 @@ fn call(action: &str, params: Value) -> std::result::Result<Value, ToolError> {
 pub async fn daw_health() -> std::result::Result<Value, ToolError> {
     let mut out = json!({ "actions_available": heretic_daw::ACTIONS.len() });
 
-    match call("ping", json!({})) {
+    let b = bridge()?;
+    if !b.is_alive() {
+        out["bridge"] = json!("sin heartbeat");
+        out["que_hacer"] = json!(
+            "No existe el heartbeat del bridge. En Reaper: Actions > Show action \
+             list > ReaScript > cargarlo y darle a Run. El bridge debe estar \
+             corriendo DENTRO de Reaper."
+        );
+        return Ok(out);
+    }
+    match call("transport_get_state", json!({})) {
         Ok(v) => {
             out["bridge"] = json!("ok");
             out["bridge_info"] = v;
@@ -111,39 +121,51 @@ pub async fn daw_health() -> std::result::Result<Value, ToolError> {
 // 2. daw_catalog
 // ============================================================================
 
-#[tool(description = "List the DAW actions available, grouped by domain, with the parameters each one takes. Call this before daw_do when you are not sure of an exact action name or its params. Passing a domain returns only that group (project, track, fx, midi, item, marker, envelope, send, compose, selection, transport, tempo, script). This is how you discover the long tail: daw_do can call anything that shows up here.")]
+#[tool(description = "Discover what the DAW can do. Returns every action grouped by domain, and for each one the parameters it reads and which of them are required. Call this before daw_do whenever you are not sure of an action name or of its parameter names, which is the mistake that fails silently: Reaper does NOT error on an unknown parameter, it uses the default and reports success. Pass a domain to get just that group (track, project, fx, midi, item, marker, envelope, send, selection, transport, tempo, compose, script, ...). Everything listed here is reachable with daw_do.")]
 pub async fn daw_catalog(
     domain: Option<String>,
 ) -> std::result::Result<Value, ToolError> {
-    let all = heretic_daw::ACTIONS;
-    let grouped: Map<String, Value> = all
+    // Cada accion lleva sus params y sus obligatorios, leidos del codigo del
+    // bridge (ver tools/gen_actions.py). Sin esto el LLM tiene que adivinar
+    // los nombres, y adivinar es exactamente el fallo que no avisa.
+    let by_group: Map<String, Value> = heretic_daw::ACTION_GROUPS
         .iter()
-        .fold(Map::new(), |mut acc, a| {
-            let d = a.split('.').next().unwrap_or("otros");
-            let entry = acc.entry(d.to_string()).or_insert_with(|| json!([]));
-            if let Some(arr) = entry.as_array_mut() {
-                arr.push(json!(a));
-            }
-            acc
-        });
+        .map(|(group, names)| {
+            let list: Vec<Value> = names
+                .iter()
+                .map(|name| match heretic_daw::actions::doc_of(name) {
+                    Some(d) => json!({
+                        "action": d.name,
+                        "module": d.module,
+                        "params": d.params,
+                        "required": d.required,
+                    }),
+                    None => json!({ "action": name }),
+                })
+                .collect();
+            (group.to_string(), Value::Array(list))
+        })
+        .collect();
 
     match domain.as_deref().map(str::trim) {
         Some(d) if !d.is_empty() => {
             let key = d.to_ascii_lowercase();
-            match grouped.get(&key) {
-                Some(list) => Ok(json!({ "domain": key, "actions": list })),
+            match by_group.get(&key) {
+                Some(list) => Ok(json!({
+                    "domain": key,
+                    "count": list.as_array().map(Vec::len).unwrap_or(0),
+                    "actions": list,
+                })),
                 None => Ok(json!({
                     "error": format!("dominio desconocido: {key}"),
-                    "dominios_disponibles": grouped.keys().collect::<Vec<_>>(),
+                    "dominios": by_group.keys().collect::<Vec<_>>(),
                 })),
             }
         }
         _ => Ok(json!({
-            "total": all.len(),
-            "por_dominio": grouped.keys().collect::<Vec<_>>(),
-            "acciones": grouped,
-            "nota": "Para la lista completa con descripciones, mira el catalogo \
-                     del bridge Lua o llama a daw_do con la accion directa.",
+            "total": heretic_daw::ACTIONS.len(),
+            "grupos": by_group.keys().collect::<Vec<_>>(),
+            "acciones": by_group,
         })),
     }
 }
@@ -164,7 +186,7 @@ pub async fn daw_do(
 // 4. daw_project
 // ============================================================================
 
-#[tool(description = "Manage the DAW project: op=info (name, tempo, sample rate, dirty state), op=new (create an empty project, optionally from a template file), op=save (save in place), op=saveAs (save to a new path), op=open (load a .rpp file), op=render (render the project or a time range to a WAV file), op=paths (project and resource directories). Unlike FL Studio, REAPER has a real project API, so all of this works without touching the UI.")]
+#[tool(description = "Manage the DAW project: op=info (name, tempo, sample rate, dirty state), op=new (create an empty project, optionally from a template file), op=save (save in place), op=saveAs (save to a new path), op=open (load a .rpp file), op=render (render the project or a time range to a WAV file), op=metadata (project notes and metadata). Unlike FL Studio, REAPER has a real project API, so all of this works without touching the UI.")]
 pub async fn daw_project(
     op: String,
     path: Option<String>,
@@ -175,12 +197,12 @@ pub async fn daw_project(
 ) -> std::result::Result<Value, ToolError> {
     let op = op.trim().to_ascii_lowercase();
     let mut p = Map::new();
-    let mut method = "project".to_string();
+    let method: &str;
 
     match op.as_str() {
-        "info" => method = "project.info".into(),
+        "info" => method = "project_get_info".into(),
         "new" => {
-            method = "project.new".into();
+            method = "project_new".into();
             if let Some(n) = name {
                 p.insert("name".into(), json!(n));
             }
@@ -188,23 +210,23 @@ pub async fn daw_project(
                 p.insert("template".into(), json!(t));
             }
         }
-        "save" => method = "project.save".into(),
+        "save" => method = "project_save".into(),
         "saveas" => {
-            method = "project.saveAs".into();
+            method = "project_save_as".into();
             let path = path.ok_or_else(|| {
                 ToolError::invalid_params("daw_project saveAs necesita 'path'")
             })?;
             p.insert("path".into(), json!(path));
         }
         "open" => {
-            method = "project.open".into();
+            method = "project_open".into();
             let path = path.ok_or_else(|| {
                 ToolError::invalid_params("daw_project open necesita 'path' (un .rpp)")
             })?;
             p.insert("path".into(), json!(path));
         }
         "render" => {
-            method = "project.render".into();
+            method = "project_export_audio".into();
             if let Some(s) = start {
                 p.insert("start".into(), json!(s));
             }
@@ -215,7 +237,7 @@ pub async fn daw_project(
                 p.insert("fileName".into(), json!(n));
             }
         }
-        "paths" => method = "project.paths".into(),
+        "paths" => method = "project_get_paths".into(),
         other => {
             return Err(ToolError::invalid_params(format!(
                 "op desconocido: {other}. Validas: info, new, save, saveAs, open, render, paths"
