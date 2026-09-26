@@ -360,25 +360,57 @@ Descubiertos porque da error, no por leerlo:
 ## 9. Estado
 
 ### Hecho
-- [x] Investigación de alternativas: Reaper es la vía viable
+- [x] Investigacion de alternativas: Reaper es la via viable
 - [x] Reaper 7.80 instalado
 - [x] 3 MCPs clonados en `reference/` y analizados (coste real medido)
-- [x] Andamiaje `heretic-daw` con file-RPC (9/9 tests)
-- [x] 7 tools MCP compilando, verificadas contra Reaper real
+- [x] Andamiaje `heretic-daw` con file-RPC
 - [x] Repo renombrado a `daw-heretic-mcp`
-- [x] Bridge Lua instalado y autostarteando (`__startup.lua`)
+- [x] Bridge Lua instalado y autostarteando (`__startup.lua` + supervisor)
 - [x] 162 acciones **generadas** del bridge, con params y obligatorios
-- [x] Tests que atan las tools al catálogo generado
+- [x] Tests que atan las tools al catalogo generado
 - [x] MCP de FL Studio y magda desconfigurados de opencode
+- [x] **Catalogo de la API real de Reaper**: 730 funciones parseadas del HTML
+      oficial de v7.80, con firma Lua, retorno y las 475 claves con nombre.
+      `docs/REAPER_API.md` **generado** (1526 lineas). Regenerable.
+- [x] Regla del prefijo `{dominio}_{sufijo}` en vez de tabla a mano, con test
+      sobre las 162 (una tabla de 40 entradas son 40 sitios donde equivocarse)
+- [x] `daw_debug`: lee y cierra el dialogo modal que congela Reaper, y ejecuta
+      Lua con `pcall` para que un error vuelva como texto y no como congelacion
+- [x] Guardián (`daw_guard.lua`) y supervisor (`daw_supervisor.lua`), versionados
+      e instalados por `daw_debug op=install`
+- [x] `daw_master`: medir con `CalculateNormalization` (LUFS-I, RMS-I, pico,
+      true pico) y normalizar. **Verificado contra la verdad externa**
+- [x] Fixture de 4 WAV con respuesta conocida, verificado por fuera con el
+      modulo `wave` de Python
+- [x] Factor de cresta (pico - RMS) como deteccion de recorte
+- [x] `tools/install_release.ps1`, probado en los dos caminos
+- [x] 76 tests
+
+### Verificado contra Reaper real
+- `daw_track op=create`, `fx_add` (Dexed, 2241 params), 5 notas escritas y leidas
+- `daw_master op=import` + `op=measure`: los 4 deltas de 17 dB con **error 0,00**
+- `daw_debug op=eval`: Lua con `pcall`, tablas, y errores como texto
+- El supervisor arranca el bridge solo al abrir Reaper (latido vivo a los 4 s)
+- `op=restart_bridge` se niega a relanzar si el DAW contesta
 
 ### Pendiente, por orden
-1. [ ] **FL Studio VSTi en Reaper** para tener FLEX. Es lo que decide si esto
-       sirve para algo: sin los sounds, es un DAW vacío
-2. [ ] E2E completo por el MCP (ya funciona a mano, falta el test)
-3. [ ] Installer automático: bridge + `__startup.lua` + config de opencode
-4. [ ] Decidir qué queda de `heretic-core` (el audit log pasa de "seguridad"
-       a "observabilidad": qué le cambió el agente a mi DAW)
+1. [ ] **`daw_music`: componer.** Es lo unico grande que falta. El cuello es que
+        el agente calcula numeros de nota y posiciones a mano; la API tiene 41
+        funciones MIDI de las que el bridge usa 25. Es la mitad de "componer" que
+        dijimos, y va despues de "masterizar", que ya esta.
+2. [ ] E2E completo por el MCP. `tools/mcp_call.py` ya prueba el transporte, pero
+        no hay un test que vaya de project vacio a cancion.
+3. [ ] Installer automatico: bridge + `__startup.lua` + supervisor + config de
+        opencode, todo con `install_release.ps1` y sin pasos manuales.
+4. [ ] Decidir que queda de `heretic-core` (el audit log pasa de "seguridad" a
+        "observabilidad": que le cambio el agente a mi DAW)
+5. [ ] El aviso de evaluacion de Reaper no se quita de forma automatica: ignora
+        `WM_CLOSE` y su boton cambia de texto. Medido, y no bloquea, asi que es
+        una red de seguridad y no un paso del arranque.
 
+### Changelog
+- 2026-09-26 — API real documentada, `daw_debug` y `daw_master` aí, y 9
+  bugs de fondo cazados midiendo en vez de suponiendo (ver §6b y §5b)
 ## 10. Reglas para futuras sesiones
 
 - **Español** en conversación, **inglés** en código y docs.
