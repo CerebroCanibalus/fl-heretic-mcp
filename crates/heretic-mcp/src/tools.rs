@@ -185,6 +185,46 @@ pub async fn daw_do(
     call(&action, params.map(Value::Object).unwrap_or(json!({})))
 }
 
+
+/// Resuelve `dominio` + `accion` al nombre real del bridge.
+///
+/// No hay tabla: los 162 nombres del catalogo siguen el prefijo sin excepcion
+/// (ver test `todo_grupo_cumple_el_prefijo` en heretic-daw). Antes habia una
+/// tabla escrita a mano con 40 entradas, y `daw_track op=create` producia
+/// `track.create` -> `Unknown command: track.create`.
+///
+/// Que la regla se compruebe con un test y no de palabra: 40 entradas
+/// escritas a mano son 40 sitios donde equivocarse, y equivocarse aqui no da
+/// error de compilacion, da un fallo en runtime contra el DAW.
+pub fn resolver_accion(dominio: &str, accion: &str) -> Result<String, ToolError> {
+    let nombre = format!("{dominio}_{accion}");
+    if heretic_daw::actions::doc_of(&nombre).is_some() {
+        return Ok(nombre);
+    }
+    // Busca lo mas parecido: un nombre mal escrito da "Unknown command" sin
+    // decir cual era el bueno.
+    let prefijo = format!("{dominio}_");
+    let cerca: Vec<&str> = heretic_daw::ACTIONS
+        .iter()
+        .copied()
+        .filter(|a| a.starts_with(&prefijo))
+        .filter(|a| accion.len() > 2 && comun(a, accion) >= 3)
+        .take(6)
+        .collect();
+    let total = heretic_daw::ACTIONS.iter().filter(|a| a.starts_with(&prefijo)).count();
+    Err(ToolError::invalid_params(format!(
+        "'{nombre}' no existe en el catalogo del bridge.{}",
+        if cerca.is_empty() {
+            format!(" Hay {total} acciones '{prefijo}*'; mira daw_catalog(domain=\"{dominio}\").")
+        } else {
+            format!(" Parecidos: {cerca:?}. Mira daw_catalog(domain=\"{dominio}\").")
+        }
+    )))
+}
+
+fn comun(a: &str, b: &str) -> usize {
+    a.chars().zip(b.chars()).take_while(|(x, y)| x == y).count()
+}
 // ============================================================================
 // 4. daw_project
 // ============================================================================
@@ -254,7 +294,7 @@ pub async fn daw_project(
 // 5. daw_track
 // ============================================================================
 
-#[tool(description = "Manage DAW tracks. op=list (all tracks with volume, pan, mute, solo, FX count), op=info (one track in detail), op=create (new track, optional name), op=delete, op=rename, op=volume (linear 0..1 or dB depending on the DAW, read with op=info to see the scale), op=pan, op=mute, op=solo, op=arm, op=color. Track indices are 0-based and count from the first track.")]
+#[tool(description = "Manage DAW tracks. op is the SUFFIX of the real action, so the tool composes the full name: op=get_all, op=info, op=create, op=rename, op=set_volume, op=set_pan, op=set_mute, op=set_solo, op=set_record_arm, op=set_color, op=delete_batch, op=select. Call daw_catalog(domain=\"track\") for the full list. Track indices are 0-based from the first track; volume is in dB (that is what Reaper uses).")]
 pub async fn daw_track(
     op: String,
     track: Option<i32>,
@@ -272,14 +312,15 @@ pub async fn daw_track(
     if let Some(v) = value {
         p.insert("value".into(), json!(v));
     }
-    call(&format!("track.{op}"), Value::Object(p))
+    let nombre = resolver_accion("track", &op)?;
+    call(&nombre, Value::Object(p))
 }
 
 // ============================================================================
 // 6. daw_fx
 // ============================================================================
 
-#[tool(description = "Manage plugins on a track. op=search (find installed plugins by name, including the FL Studio VSTi if you added it), op=add (insert a plugin by name, returns its index), op=remove, op=list (FX chain of a track), op=paramInfo (names and ranges of a plugin's parameters, with values normalized 0..1), op=getParam / op=setParam (value is ALWAYS normalized 0..1 regardless of the plugin's own range), op=preset (list or load presets), op=toggle (bypass). This is the path to FLEX: load 'FL Studio VSTi (Multi)' on an instrument track and Reaper can play FL's own instruments.")]
+#[tool(description = "Manage plugins on a track. op is the SUFFIX of the real action: op=list_installed (every plugin the DAW sees), op=add, op=remove_batch, op=get_chain, op=get_params, op=set_param, op=get_preset, op=set_preset, op=enable, op=disable, op=show_ui, op=move, op=get_instrument. Call daw_catalog(domain=\"fx\") for the full list with each one's params. FX parameter values are ALWAYS normalized 0..1 whatever range the plugin itself advertises, so read get_params to learn a value before writing one. This is also the path to FL's own instruments: load the 'FL Studio VSTi' plugin on an instrument track.")]
 pub async fn daw_fx(
     op: String,
     track: Option<i32>,
@@ -307,14 +348,15 @@ pub async fn daw_fx(
         // parametro, asi que mandar el valor "real" no funciona.
         p.insert("value".into(), json!(v.clamp(0.0, 1.0)));
     }
-    call(&format!("fx.{op}"), Value::Object(p))
+    let nombre = resolver_accion("fx", &op)?;
+    call(&nombre, Value::Object(p))
 }
 
 // ============================================================================
 // 7. daw_midi
 // ============================================================================
 
-#[tool(description = "Write and read MIDI. op=createItem (empty MIDI item on a track; position in beats, optional), op=addNote (single note: pitch, start, length, velocity), op=addNotes (batch, for chords and patterns), op=getNotes (read back the notes in an item), op=clear, op=read (parse notes from any item). Positions are in BEATS, not seconds: with a 4/4 bar at 120bpm, beat 0 is bar 1 and beat 4 is bar 2.")]
+#[tool(description = "Write and read MIDI. op is the SUFFIX of the real action: op=insert_note (one note: pitch, start, length, velocity), op=insert_notes_batch (batch, for chords and patterns), op=get_notes, op=delete_all_notes, op=count_events, op=get_note_names. Call daw_catalog(domain=\"midi\") for the full list. Positions are in BEATS, not seconds: with 4/4 at 120bpm, beat 0 is bar 1 and beat 4 is bar 2. Create the item first with daw_do (action=\"item_create_midi\").")]
 pub async fn daw_midi(
     op: String,
     track: Option<i32>,
@@ -348,7 +390,8 @@ pub async fn daw_midi(
     if let Some(n) = notes {
         p.insert("notes".into(), n);
     }
-    call(&format!("midi.{op}"), Value::Object(p))
+    let nombre = resolver_accion("midi", &op)?;
+    call(&nombre, Value::Object(p))
 }
 
 // ============================================================================
