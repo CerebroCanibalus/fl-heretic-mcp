@@ -180,6 +180,65 @@ cuando el daemon leía `position`). Con `daw_fx("add", track=0, fx="ReaEQ")`
 el schema dice el nombre exacto. `daw_do` deja la larga cola abierta, pero el
 error ya no es silencioso.
 
+## 6b. Trampas de Reaper (medidas, no supuestas)
+
+Cada una costó tiempo o dejó el DAW inservible. Todas están en el código con su
+porqué, pero esta lista es el aviso rápido.
+
+### Congelan el DAW entero
+
+| trampa | qué pasa |
+|---|---|
+| un error de ReaScript abre un **diálogo modal** | Reaper deja de leer `command.json`; el agente solo ve "no respondió en 10 s". Por eso existen `daw_debug` y el guardián con `pcall` |
+| `GetSetProjectInfo_String("RENDER_STATS")` sin la preferencia activada | abre un modal pidiendo permiso. La pref va en Opciones > Preferencias > Rendering > Stats/Charts |
+| `BrowseForOpenFiles` | selector de ficheros modal. El MCP ya tiene la ruta: no se usa nunca |
+| `Main_OnCommand` sobre un ReaScript **en marcha** | no es no-op: se lleva la instancia que funciona y la sustituye. Y la sustituta no arranca porque el bridge no mira el lock. **Nunca en caliente** |
+
+### Fallan en silencio (lo peor)
+
+| trampa | real |
+|---|---|
+| `CalculateNormalization` devuelve un **factor lineal**, no dB | `medido_dB = objetivo_dB - 20*log10(retorno)`. Leerlo como dB desplaza todo y parece una medición |
+| `InsertMedia` devuelve `integer` (éxito), no el item | buscar el item por índice en la pista |
+| `math.log10` **no existe** en el Lua de Reaper | `math.log` sí. De ahí `math.log(x)/math.log(10)` |
+| `GetSetProjectInfo` con clave desconocida devuelve nil sin avisar | la clave no se asigna y desaparece del JSON |
+| params del bridge en **snake_case** | `track_index`, `fx_name`. Nada de `trackIndex` |
+| nota MIDI usa `end`, no `length`; velocity 0-127 | y las posiciones van en **beats** |
+
+### Rutas y scripts
+
+- `reaper.GetResourcePath()` **no lleva separador final**. `"Scripts\\x"` sale
+  `REAPERScripts\\x`, `AddRemoveReaScript` devuelve 0 sin decir por qué, y el
+  supervisor se iba por su `return`. El bridge lo hace bien con `.. "/Scripts"`.
+- El supervisor escribe en `%TEMP%\\reaper_mcp\\supervisor.log`. Antes su rastro
+  estaba en la consola de ReaScript, que es un RichEdit y **no se puede leer
+  desde fuera**: nadie podría enterarse de un fallo.
+- `__startup.lua` corre antes de que la lista de acciones esté lista: sin
+  `defer` doble, nada arranca.
+
+### Lo que el catálogo generado evita
+
+- 730 funciones reales; el bridge envuelve 161. Catálogo en
+  `crates/heretic-daw/data/reaper-api.json` (versionado), .md generado en
+  `docs/REAPER_API.md`.
+- Ha pillado **funciones inventadas** 4 veces: `GetTrackChannelInfo`,
+  `GetActiveTrack`, `GetTrackNumber`, `TimeMap_TimeToBeats` (real:
+  `TimeMap2_timeToBeats`). Cada una, si llega al DAW, congela Reaper.
+- Regenerar: `python tools/gen_api_docs.py` (HTML -> JSON) y
+  `python tools/gen_api_md.py` (JSON -> MD). **El .md no se edita a mano.**
+
+### El fixture que se autoniega
+
+`wav.rs` genera 4 señales con respuesta conocida. Lo importante no son los
+ficheros: es que se **verifican por fuera** (módulo `wave` de Python) y no
+con el código que las genera. Es lo único que cazó el bug de los dB, porque un
+test que comprobara "devuelve un número" habría pasado igual.
+
+Y una expectativa mía que era **falsa** y corregí: el fichero recortado NO
+tiene "mucha menos sonoridad que su pico". Al revés: recortar **aplasta las
+crestas y acerca el RMS al pico** (factor de cresta 1.07 dB frente a 3.01 de un
+sano). De ahí salió la detección de recorte.
+
 ## 7. `reference/`: los MCPs que estudiar
 
 Clonados, en `.gitignore` (material de referencia, no código nuestro):
