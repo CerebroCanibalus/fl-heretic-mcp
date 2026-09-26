@@ -30,8 +30,15 @@
 //! escribir en %TEMP% el mismo, asi que un HMAC entre dos procesos del mismo
 //! usuario no protege nada. Era seguridad de teatro.
 
-#![forbid(unsafe_code)]
+// `deny`, no `forbid`: el unico `unsafe` del crate son las seis llamadas a
+// `user32` de `win.rs`, que hacen falta para leer el dialogo modal que
+// Reaper abre cuando un ReaScript peta (y que congela el DAW entero).
+// Aislado ahi con `#[allow(unsafe_code)]`, el resto del crate sigue
+// compilando sin una sola construccion insegura.
+#![deny(unsafe_code)]
 
+pub mod debug;
 pub mod tools;
+pub mod win;
 #[cfg(test)]
 mod tools_tests;
