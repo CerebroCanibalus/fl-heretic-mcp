@@ -209,7 +209,7 @@ pub async fn daw_catalog(
 // 3. daw_do (escape hatch)
 // ============================================================================
 
-#[tool(description = "Call any DAW action by name. This reaches all 181 actions, including the long tail that has no dedicated tool. Use daw_catalog first if you are unsure of the name. IMPORTANT: Reaper does NOT error on an unknown parameter, it silently uses the default and reports success, so parameter names must match exactly (camelCase, e.g. trackIndex / fxIndex / paramIndex, not track_index). The typed tools (daw_track, daw_fx, daw_midi, daw_project) exist precisely so that this mistake is hard to make on the common path.")]
+#[tool(description = "Call any DAW action by name. This reaches all 181 actions, including the long tail that has no dedicated tool. Use daw_catalog first if you are unsure of the name. IMPORTANT: parameter names are snake_case, exactly as they appear in daw_catalog (track_index / fx_index / item_index / param_index). An unknown parameter does NOT error: Reaper silently uses the default and reports success, so a typo looks like it worked. The typed tools (daw_track, daw_fx, daw_midi, daw_project) exist so that this mistake is hard to make on the common path. The typed tools (daw_track, daw_fx, daw_midi, daw_project) exist precisely so that this mistake is hard to make on the common path.")]
 pub async fn daw_do(
     action: String,
     params: Option<Map<String, Value>>,
@@ -261,7 +261,21 @@ fn comun(a: &str, b: &str) -> usize {
 // 4. daw_project
 // ============================================================================
 
-#[tool(description = "Manage the DAW project: op=info (name, tempo, sample rate, dirty state), op=new (create an empty project, optionally from a template file), op=save (save in place), op=saveAs (save to a new path), op=open (load a .rpp file), op=render (render the project or a time range to a WAV file), op=metadata (project notes and metadata). Unlike FL Studio, REAPER has a real project API, so all of this works without touching the UI.")]
+/// `RENDER_FILE` es el DIRECTORIO y `RENDER_PATTERN` el nombre con comodines.
+/// `daw_project op=render` recibe una unica ruta, asi que hay que partirla, y
+/// Partirla a ojo en el agente es una fuente de errores de esto.
+fn partir_render_path(path: &str) -> (String, String) {
+    match path.rfind(['\\', '/']) {
+        Some(i) if i > 0 => (path[..i].to_string(), path[i + 1..].to_string()),
+        _ => (".".to_string(), path.to_string()),
+    }
+}
+
+/// `evaw` es el codigo de RENDER_FORMAT para WAV en REAPER. Viene del cfg de
+/// render, no es inventado: es lo que se leyo del propio proyecto.
+const FORMATO_WAV: &str = "evaw";
+
+#[tool(description = "Manage the DAW project. op=info (name, tempo, sample rate, dirty state), op=new (empty project; it CANNOT be named or built from a template: PROJECT_NAME is read-only in Reaper's API - use op=open for a template), op=save, op=saveAs (needs path), op=open (needs path, an .rpp), op=render (needs path: the output WAV; optional start/end in seconds render just that range), op=paths. Unlike FL Studio, REAPER has a real project API, so all of this works without touching the UI.")]
 pub async fn daw_project(
     op: String,
     path: Option<String>,
@@ -277,13 +291,13 @@ pub async fn daw_project(
     match op.as_str() {
         "info" => method = "project_get_info".into(),
         "new" => {
+            // `name` y `template` se mandaban aqui y el bridge no los leia:
+            // Reaper no avisa de un parametro desconocido, asi que los dos
+            // parecian funcionar y no hacian nada. `PROJECT_NAME` es read-only
+            // en la API de Reaper, con lo que un proyecto sin guardar no tiene
+            // nombre por API. Para una plantilla, op=open.
+            let _ = (&name, &template);
             method = "project_new".into();
-            if let Some(n) = name {
-                p.insert("name".into(), json!(n));
-            }
-            if let Some(t) = template {
-                p.insert("template".into(), json!(t));
-            }
         }
         "save" => method = "project_save".into(),
         "saveas" => {
@@ -301,15 +315,28 @@ pub async fn daw_project(
             p.insert("path".into(), json!(path));
         }
         "render" => {
+            // El bridge exige render_dir, render_pattern y format_code. Esta
+            // rama no mandaba ninguno de los tres, asi que op=render no podia
+            // funcionar: fallaba con "Missing parameter: render_dir". Ahora se
+            // parte el `path` de salida en directorio y nombre, que es como lo
+            // quiere REAPER (RENDER_FILE es el directorio, RENDER_PATTERN el
+            // nombre con sus comodines).
             method = "project_export_audio".into();
+            let path = path.ok_or_else(|| {
+                ToolError::invalid_params(
+                    "daw_project render necesita 'path' con el WAV de salida, \
+                     por ejemplo C:\\\\Users\\\\Tú\\\\prueba.wav",
+                )
+            })?;
+            let (dir, patron) = partir_render_path(&path);
+            p.insert("render_dir".into(), json!(dir));
+            p.insert("render_pattern".into(), json!(patron));
+            p.insert("format_code".into(), json!(FORMATO_WAV));
             if let Some(s) = start {
                 p.insert("start".into(), json!(s));
             }
             if let Some(e) = end {
                 p.insert("end".into(), json!(e));
-            }
-            if let Some(n) = name {
-                p.insert("fileName".into(), json!(n));
             }
         }
         "paths" => method = "project_get_paths".into(),
@@ -336,7 +363,7 @@ pub async fn daw_track(
     let op = op.trim().to_ascii_lowercase();
     let mut p = Map::new();
     if let Some(t) = track {
-        p.insert("trackIndex".into(), json!(t));
+        p.insert("track_index".into(), json!(t));
     }
     if let Some(n) = name {
         p.insert("name".into(), json!(n));
@@ -364,16 +391,16 @@ pub async fn daw_fx(
     let op = op.trim().to_ascii_lowercase();
     let mut p = Map::new();
     if let Some(t) = track {
-        p.insert("trackIndex".into(), json!(t));
+        p.insert("track_index".into(), json!(t));
     }
     if let Some(f) = fx {
-        p.insert("fxIndex".into(), json!(f));
+        p.insert("fx_index".into(), json!(f));
     }
     if let Some(n) = param {
-        p.insert("paramIndex".into(), json!(n));
+        p.insert("param_index".into(), json!(n));
     }
     if let Some(n) = name {
-        p.insert("fxName".into(), json!(n));
+        p.insert("fx_name".into(), json!(n));
     }
     if let Some(v) = value {
         // Normalizado a 0..1 SIEMPRE. Reaper usa su propia escala por
@@ -402,10 +429,10 @@ pub async fn daw_midi(
     let op = op.trim().to_ascii_lowercase();
     let mut p = Map::new();
     if let Some(t) = track {
-        p.insert("trackIndex".into(), json!(t));
+        p.insert("track_index".into(), json!(t));
     }
     if let Some(i) = item {
-        p.insert("itemIndex".into(), json!(i));
+        p.insert("item_index".into(), json!(i));
     }
     if let Some(n) = pitch {
         p.insert("pitch".into(), json!(n));

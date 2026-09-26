@@ -208,3 +208,129 @@ fn las_acciones_documentan_sus_params() {
          un objeto {{track_index: N}}. El error real fue 'Entry must be an object'."
     );
 }
+
+// ============================================================================
+// Tools contra el bridge: los parametros tienen que existir de verdad
+// ============================================================================
+//
+// Medido: las seis claves que las tools insertaban eran camelCase
+// (`trackIndex`, `fxIndex`, `itemIndex`, `paramIndex`, `fxName`, `fileName`)
+// mientras que el bridge lee `p.track_index` y compañía. No hay conversion en
+// ninguna capa, asi que toda llamada que necesitara un indice fallaba con
+// `Missing parameter: track_index`, y las que no lo necesitan funcionaban bien:
+// el fallo solo aparecia en el camino que de verdad importa.
+//
+// Y al reves: `daw_project` mandaba `name` y `template` a `project_new`, que no
+// los lee, y `start`/`end`/`file_name` a `project_export_audio`, que no los
+// leia. Reaper no avisa de un parametro desconocido: usa el valor por defecto y
+// devuelve exito. Un test que solo mira el codigo de la tool no ve nada, asi que
+// estos tests comprueban las claves contra el catalogo del bridge, que es lo
+// unico que sabe lo que el bridge lee de verdad.
+
+/// Claves que las tools insertan en el `Map` de params.
+///
+/// Se extrae del codigo, no se escribe a mano: una lista escrita a mano
+/// comprobaria que la lista esta al dia consigo misma.
+fn claves_que_inserta_el_codigo() -> Vec<String> {
+    let src = include_str!("tools.rs");
+    let mut out = Vec::new();
+    for trozo in src.split("p.insert(\"").skip(1) {
+        let clave: String = trozo
+            .chars()
+            .take_while(|c| c.is_alphanumeric() || *c == '_')
+            .collect();
+        if !clave.is_empty() {
+            out.push(clave);
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
+#[test]
+fn ninguna_clave_insertada_es_camel_case() {
+    let camel: Vec<String> = claves_que_inserta_el_codigo()
+        .into_iter()
+        .filter(|k| k.chars().any(|c| c.is_uppercase()))
+        .collect();
+    assert!(
+        camel.is_empty(),
+        "estas claves se insertan en camelCase y el bridge no las lee: {camel:?}. \
+         El bridge solo lee p.<snake_case>."
+    );
+}
+
+#[test]
+fn cada_clave_insertada_existe_en_al_una_accion_del_bridge() {
+    let claves = claves_que_inserta_el_codigo();
+    assert!(
+        !claves.is_empty(),
+        "no se extrajo ninguna clave: el parser se rompio"
+    );
+
+    let leidas: std::collections::BTreeSet<String> = heretic_daw::actions::ACTION_DOCS
+        .iter()
+        .flat_map(|d| d.params.iter().map(|s| s.to_string()))
+        .collect();
+
+    let huerfanas: Vec<&String> = claves.iter().filter(|k| !leidas.contains(*k)).collect();
+    assert!(
+        huerfanas.is_empty(),
+        "estas claves las envia una tool pero ningun handler del bridge las lee: {huerfanas:?}. \
+         O el nombre esta mal, o la clave no deberia enviarse."
+    );
+}
+
+#[test]
+fn las_acciones_midi_declaran_item_index() {
+    // `get_midi_take(p)` exige `item_index` pero no esta en el cuerpo del
+    // handler, asi que el generador no lo via y el catalogo decia que estas 9 de
+    // 17 acciones no pedian nada.
+    for d in heretic_daw::actions::ACTION_DOCS.iter().filter(|d| d.module == "midi") {
+        if d.name == "midi_get_note_names" || d.name == "midi_list_programs" {
+            continue; // estas no tocan ningun item
+        }
+        assert!(
+            d.required.contains(&"item_index"),
+            "{} no declara item_index en required, pero llama a get_midi_take(p) que lo exige.",
+            d.name
+        );
+    }
+}
+
+#[test]
+fn el_grupo_del_catalogo_es_el_prefijo_del_nombre() {
+    // La regla que usa el codigo es `{grupo}_{sufijo}`, y el grupo es lo que
+    // `daw_catalog` ensena. Si un nombre no se reconstruye como
+    // `{grupo}_{sufijo}`, `daw_catalog` no lo lista y el agente no lo descubre.
+    //
+    // NOTA: el grupo NO es el modulo Lua del handler, y por eso 17 de 162 no
+    // coinciden (`chops_create_virtual_slice` esta en el modulo `item`, con
+    // grupo `chops`). La afirmacion de que "los 162 cumplen sin excepcion" era
+    // falsa: cumplen la regla del grupo, no la del modulo.
+    for (grupo, nombres) in heretic_daw::actions::ACTION_GROUPS {
+        for n in *nombres {
+            let prefijo = format!("{grupo}_");
+            assert!(
+                n.starts_with(&prefijo),
+                "{n} esta en el grupo {grupo} pero no empieza por {prefijo}"
+            );
+        }
+    }
+}
+
+#[test]
+fn todo_nombre_del_catalogo_aparece_en_algun_grupo() {
+    let mut en_grupos: Vec<&str> = Vec::new();
+    for (_, nombres) in heretic_daw::actions::ACTION_GROUPS {
+        en_grupos.extend(nombres.iter().copied());
+    }
+    for d in heretic_daw::actions::ACTION_DOCS {
+        assert!(
+            en_grupos.contains(&d.name),
+            "{} esta en ACTION_DOCS pero en ningun grupo: daw_catalog no lo listaria",
+            d.name
+        );
+    }
+}

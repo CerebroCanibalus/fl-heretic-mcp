@@ -1,507 +1,308 @@
-# DAW Heretic MCP
+# AGENTS.md — DAW Heretic MCP
 
-> **Memoria viva del proyecto.** Cualquier sesión futura debe leer esto primero.
+> Memoria viva del proyecto. Una sesión futura lee esto primero.
+> Reescrito en la Fase 0 (2026-09-26): la versión anterior mezclaba hallazgos
+> verificados con suposiciones, y daba por cierto algo que se demostró falso.
 
 ---
 
 ## 0. Qué es esto
 
-Un servidor MCP en Rust que deja que un agente IA controle una DAW entera:
-crear proyectos, pistas, meter plugins, escribir MIDI, mezclar, renderizar.
+Servidor MCP en Rust que controla **Reaper** desde un agente de IA. La gracia no
+es que se pueda automatizar un DAW —eso lo hace cualquiera— sino que el agente
+**no pueda mentirle sobre el estado del DAW**: cada respuesta viene de la API
+real de Reaper, y todo lo que se afirma aquí está medido contra el DAW, no
+inferido.
 
-**Estado: el transporte funciona contra Reaper real.** 5/5 tests live
-verdes: se escribe el tempo, se relee, se crean y borran pistas. El bridge
-Lua está instalado y se autostartea.
+- **Licencia:** GPL-3.0-or-later
+- **Stack:** Cargo workspace, Rust 2024, `flojo-mcp` (path dep), `tokio`, `rusqlite`, `clap`
+- **Puente:** un ReaScript en Lua (`reaper_mcp_server.lua`, 226 KB) talks con el
+  MCP por file-RPC.
+- **Filosofía:** el agente **no** es de confianza → validar, medir, auditar. Pero
+  sin teatro: HMAC entre procesos del mismo usuario no aporta nada, así que **no
+  hay daemon**. El agente ES el proceso.
 
-Lo que no hay todavía: el FL Studio VSTi cargado en Reaper, y el E2E completo
-a través del MCP.
-
-**Historial:** este repo empezó siendo `FLHereticMCP`. El trabajo de FL Studio
-está completo en `0930996` y el pivot a Reaper en `493f850`. Nada se perdió.
-
----
-
-## 1. Por qué no FL Studio
-
-**No es que la implementación fuera mala: es que la API no existe.** Medido
-sobre FL Studio 2025 real (MIDI scripting v38),across sus 11 módulos:
-
-| Necesidad | ¿FL la tiene? |
-|---|---|
-| Guardar proyecto con ruta | ✅ `midi.FPT_Save` (verificado, 90 ms) |
-| Abrir proyecto | ❌ ni `FPT_Open` ni nada en `general` |
-| Crear proyecto nuevo | ❌ ni `FPT_New` ni `general.newProject` |
-| Cerrar proyecto | ❌ ni `FPT_Close` |
-| Cambiar de proyecto | ⚠️ copiar el `.flp` + `CreateProcess` |
-
-De las **79** constantes `midi.FPT_*` solo hay `FPT_Save` y `FPT_SaveNew`.
-`FPT_SaveNew` abre un diálogo con campos `TQuickEdit` (controles Delphi
-internos) que aceptan texto pero **cierran sin guardar** al confirmar.
-
-El menú File es **owner-draw**: `GetMenu` da un handle pero
-`GetMenuItemCount` da 0, así que sus items no se leen por Win32.
-
-Y el Python del controller script va en un sandbox sin file I/O, sin sockets,
-sin `subprocess` (todo medido). Por eso el transporte acababa siendo
-ficheros + MIDI para despertarlo, con techo de 1.5KB por mensaje.
-
-**No es un defecto de FL.** La API de Cubase tiene las mismas limitaciones:
-sandboxed, sin file I/O, sin red, sin crear pistas, sin insertar plugins. Los
-DAWs modernos exponen scripting para *control de hardware*, no para
-*producción programática*.
-
-Coste real que [↑ pagamos por eso](/AUDIT.md):
-- El bridge solo corría cuando FL recibía MIDI, porque `OnIdle` no dispara.
-- Un `TWelcomeWizard` ("Welcome to FL Studio") o un "Save changes?" congelan
-  el bridge entero y hacen que **toda** escritura falle con
-  `Operation unsafe at current time`.
-- Eso hizo que "abrir un proyecto" costara tantas pruebas. Los dos modales
-  se confundían: el wizard sale al arrancar sin proyecto, el "Save changes?"
-  al abrir un `.flp` con cambios sin guardar.
-
-## 2. Por qué Reaper
-
-| | REAPER | FL Studio |
-|---|---|---|
-| Funciones de API | **900+** | crippled |
-| Control externo | file-RPC o `python-reapy` (TCP) | MIDI 1.5KB, sandbox |
-| File I/O desde el DAW | ✅ libre | ❌ bloqueado |
-| Crear pistas / insertar plugins | ✅ | ❌ |
-| MCP existentes | varios | ninguno |
-| Licencia | 60 días gratis → **$60** | $99 |
-
-Reaper 7.80 instalado en `C:\Program Files\REAPER (x64)\`.
-
-## 3. Los plugins de FL Studio
-
-Los **nativos** (FLEX, Sytrus, Harmor) no son VST3: son FL-only. Pero existe
-`FL Studio VSTi (Multi).dll` en:
-```
-D:\Program Files\Image-Line\FL Studio 2025\System\Plugin\VSTi\x64\
-```
-que carga **FL Studio entero como VST2** dentro de Reaper → FLEX y todo el
-bundle siguen disponibles.
-
-Trampas (de foros, confirmadas): pista de **instrumento** (no de audio), FL en
-modo "song", output a "FL 1".
-
----
-
-## 4. Arquitectura: sin daemon
-
-```
-opencode ──stdio MCP──> daw-heretic-mcp (FlojoMCP, Rust)
-                              │ file-RPC: command.json <-> response.json
-                              ▼
-                         [Reaper]  ←── ReaScript Lua
-```
-
-**El daemon se eliminó a propósito.** El diseño anterior asumía "el agente MCP
-no es de confianza" y ponía HMAC entre el agente y el daemon. Eso es
-**seguridad de teatro**: el agente *es* el proceso de opencode, ya puede
-escribir en `%TEMP%` por su cuenta, y puede leer el fichero del token. No hay
-frontera de privilegio que cruzar.
-
-Lo que el daemon sí resolvía, y cómo se resuelve ahora:
-
-| Lo que resolvía | Ahora |
-|---|---|
-| HMAC / ACL / rate limit | ❌ fuera, no aplica |
-| **Serializar llamadas paralelas** | `Mutex` dentro de `heretic-daw` |
-| **Saber si el bridge vive** | `daw_health` lo comprueba de verdad |
-| Reconexión tras reinicio | el MCP server es longevo, no hace falta |
-
-Menos procesos (de 4 a 2) y fuera los 3 bugs de Named Pipe que costaron una
-tarde entera (`ERROR_PIPE_BUSY` con una sola instancia de pipe, brazo duplicado
-en el dispatch, y rutas de lifecycle que no rutaban a su handler).
-
-## 5. Transporte: file-RPC
-
-El bridge Lua (`reference/xDarkzx/reaper_mcp_server.lua`, 6049 líneas, 165
-funciones de la API) usa IPC por ficheros:
-
-```text
-MCP (Rust)  --escribe-->  command.json    [dentro de Reaper]
-MCP (Rust)  <--lee--     response.json   [dentro de Reaper]
-```
-
-Es el mismo patrón que el file-RPC de FL, con **una diferencia que lo cambia
-todo**: el bridge de Reaper corre su propio bucle `defer()` a ~30 Hz. **No hay
-wake.** Eso elimina de raíz el puerto MIDI persistente, el techo de 1.5KB y
-toda la clase de fallos "el DAW no responde".
-
-Reglas que no se pueden romper:
-
-- **Atomicidad**: escribir en `.tmp` y renombrar, con 20 reintentos. En
-  Windows el rename da `PermissionError` si el bridge tiene el destino abierto.
-- **Ids monotónicos**, no timestamps: el bridge compara contra el último id
-  visto, y un id que no avance se pierde en silencio.
-- **camelCase, no snake_case**: `trackIndex`, `fxIndex`, `paramIndex`.
-  Reaper **no da error** con un param desconocido: usa el valor por defecto y
-  parece que funcionó. Hay un test que lo fija.
-- **La carpeta de IPC se crea desde el cliente.** Si no, el error dice "io" en
-  vez de "el bridge no está", que es lo que el LLM necesita para saber qué hacer.
-
-## 6. Las 7 tools
-
-Se midió el MCP de referencia con su AST:
+### Estado en cifras (verificadas 2026-09-26)
 
 | | |
 |---|---|
-| Tools | **181** |
-| descripciones | 74.157 chars (~18.500 tokens) |
-| firmas + params | 15.334 chars (~3.800 tokens) |
-| **coste en schemas** | **~22.400 tokens, en cada request** |
+| Tools MCP | **10** |
+| Acciones del puente | **162**, en 24 grupos |
+| Tests | **81**, 0 fallos |
+| API de Reaper catalogada | **730** funciones, 268 claves con nombre |
+| Funciones `reaper.*` que llama el puente | **165**, las 165 existen |
+| Acciones sin parámetros obligatorios | 66 de 162 |
 
-Y las descripciones están infladas: `setup_fx_chain` tiene 3.740 chars de
-descripción para una función de **un** parámetro (935 tokens). Es
-documentación de blog metida en un schema.
+---
 
-Ese MCP tiene perfiles (`full` 180 … `minimal` 43) porque su autor sabe que
-el problema existe, pero el default sigue siendo 180 y cambiar de perfil
-exige reiniciar el servidor. Es parchear el síntoma.
+## 1. Por qué Reaper y no FL Studio
 
-Aquí al revés: **7 por defecto, y se expande si se pide.**
+- 900+ funciones de API y ReaScript con **file I/O** (el sandbox Python de los
+  controllers de FL no lo tiene: ni `open`, ni `os.open`, ni `os.makedirs`).
+- El catálogo se **genera del HTML oficial** de REAPER v7.80, no se escribe a
+  mano. `docs/REAPER_API.md` (1.526 líneas) sale de ahí.
+- FL Studio 2025 **sí** está instalado en `D:\Program Files\Image-Line\...`, pero
+  su carpeta `System\Plugin\VSTi\x64` —que Reaper ya tenía en su lista de
+  rutas— está **vacía**. No hay VSTi de FL que importar.
 
-| Tool | Qué cubre |
-|---|---|
-| `daw_health()` | ¿Reaper vivo? ¿bridge respondiendo? |
-| `daw_catalog(domain?)` | Descubrimiento: qué acciones hay y qué params |
-| `daw_do(action, params)` | Escape hatch: **las 181 acciones** |
-| `daw_project(op, …)` | new / save / saveAs / open / render / info / paths |
-| `daw_track(op, …)` | create / list / info / rename / volume / pan / mute / solo / arm / color |
-| `daw_fx(op, …)` | search / add / remove / list / paramInfo / getParam / setParam / preset / toggle |
-| `daw_midi(op, …)` | createItem / addNote / addNotes / getNotes / clear / read |
+---
 
-**Las tipadas existen por un motivo concreto:** el bug más caro de la etapa de
-FL no fue del DAW, fue nuestro diseño. Con 17 wrappers finos cada uno
-reconstruía los params a su manera, y el LLM adivinó mal un nombre (`ms`
-cuando el daemon leía `position`). Con `daw_fx("add", track=0, fx="ReaEQ")`
-el schema dice el nombre exacto. `daw_do` deja la larga cola abierta, pero el
-error ya no es silencioso.
+## 2. Topología
 
-## 5b. Instalar el release (y por que casi no se puede desde dentro)
-
-```powershell
-# con opencode CERRADO
-.\tools\install_release.ps1
-# con la sesion abierta, para comprobar que compila sin tocar el binario vivo
-.\tools\install_release.ps1 -Verify
+```
+OpenCode (MCP stdio NDJSON)
+      |  10 tools, sin daemon
+      v
+fl-heretic / daw-heretic-mcp  (Rust)
+      |  file-RPC: command.json / response.json en %TEMP%\reaper_mcp
+      v
+reaper_mcp_server.lua  (ReaScript, hilo principal de Reaper)
+      |  API real de Reaper
+      v
+REAPER 7.80
 ```
 
-opencode ejecuta `target\release\daw-heretic-mcp.exe` y lo mantiene abierto, y
-Windows no deja reemplazar un fichero abierto. Por eso `cargo build --release`
-falla con `failed to remove ... daw-heretic-mcp.exe` y parece un problema de
-compilacion cuando lo que esta bloqueado es el propio servidor.
+Dos piezas de Lua, versionadas en `crates/heretic-mcp/lua/` e instaladas por
+`daw_debug op=install`:
 
-Durante esa temporada se compila a `target/verify` y se verifica por
-`tools/mcp_call.py`, que habla MCP de verdad por stdio. **Sin `mcp_call.py` no
-se puede probar nada de este repo**: un test unitario pasa y el tool puede
-estar roto.
+- **`daw_guard.lua`**: envuelve el payload en `pcall`. Sin él, un error de Lua
+  abre un diálogo modal y **Reaper deja de leer `command.json`**: el agente solo
+  ve "no respondió en 10 s".
+- **`daw_supervisor.lua`**: arranca el bridge al abrir Reaper, y escribe un log
+  en `%TEMP%\reaper_mcp\supervisor.log`.
 
-El aviso de "abierto" del script usa `[System.IO.File]::Open(..., FileShare::None)`,
-medido: **`Copy-Item` si funciona con un fichero abierto**, asi que copiar no
-dice nada. Solo el open exclusivo falla.
+---
 
-## 6b. Trampas de Reaper (medidas, no supuestas)
+## 3. Las 10 tools
 
-Cada una costó tiempo o dejó el DAW inservible. Todas están en el código con su
-porqué, pero esta lista es el aviso rápido.
-
-### Congelan el DAW entero
-
-| trampa | qué pasa |
+| tool | para qué |
 |---|---|
-| un error de ReaScript abre un **diálogo modal** | Reaper deja de leer `command.json`; el agente solo ve "no respondió en 10 s". Por eso existen `daw_debug` y el guardián con `pcall` |
-| `GetSetProjectInfo_String("RENDER_STATS")` sin la preferencia activada | abre un modal pidiendo permiso. La pref va en Opciones > Preferencias > Rendering > Stats/Charts |
-| `BrowseForOpenFiles` | selector de ficheros modal. El MCP ya tiene la ruta: no se usa nunca |
-| `Main_OnCommand` sobre un ReaScript **en marcha** | no es no-op: se lleva la instancia que funciona y la sustituye. Y la sustituta no arranca porque el bridge no mira el lock. **Nunca en caliente** |
+| `daw_health` | ¿responde el DAW? ¿con qué frecuencia y a qué frecuencia de muestreo? |
+| `daw_catalog` | Las 162 acciones con sus parámetros y obligatorios, en 24 grupos |
+| `daw_do` | Cualquier acción por nombre. La vía larga |
+| `daw_track` | Pistas: crear, renombrar, volumen, pan, mute, solo, color |
+| `daw_fx` | Plugins: add, chain, params con nombre, presets, enable/disable |
+| `daw_midi` | Notas MIDI: items, insertar en lote, leer, quantizar, humanizar |
+| `daw_project` | Proyecto: info, new, save, open, **render a un path** |
+| `daw_setup` | Instalación, re-scan de plugins, cadenas de FX, master, buses |
+| `daw_master` | Medir y normalizar: LUFS-I, RMS-I, pico, true pico, crest factor |
+| `daw_debug` | Diagnóstico: diálogos, `eval` de Lua, logs, relanzar el bridge |
 
-### Fallan en silencio (lo peor)
+8,3 KB de schemas frente a los 22.400 del MCP de referencia que se estudió. La
+razón del corte no es el gusto: son tokens que el agente paga en cada llamada.
 
-| trampa | real |
-|---|---|
-| `CalculateNormalization` devuelve un **factor lineal**, no dB | `medido_dB = objetivo_dB - 20*log10(retorno)`. Leerlo como dB desplaza todo y parece una medición |
-| `InsertMedia` devuelve `integer` (éxito), no el item | buscar el item por índice en la pista |
-| `math.log10` **no existe** en el Lua de Reaper | `math.log` sí. De ahí `math.log(x)/math.log(10)` |
-| `GetSetProjectInfo` con clave desconocida devuelve nil sin avisar | la clave no se asigna y desaparece del JSON |
-| params del bridge en **snake_case** | `track_index`, `fx_name`. Nada de `trackIndex` |
-| nota MIDI usa `end`, no `length`; velocity 0-127 | y las posiciones van en **beats** |
+---
 
-### Rutas y scripts
-
-- `reaper.GetResourcePath()` **no lleva separador final**. `"Scripts\\x"` sale
-  `REAPERScripts\\x`, `AddRemoveReaScript` devuelve 0 sin decir por qué, y el
-  supervisor se iba por su `return`. El bridge lo hace bien con `.. "/Scripts"`.
-- El supervisor escribe en `%TEMP%\\reaper_mcp\\supervisor.log`. Antes su rastro
-  estaba en la consola de ReaScript, que es un RichEdit y **no se puede leer
-  desde fuera**: nadie podría enterarse de un fallo.
-- `__startup.lua` corre antes de que la lista de acciones esté lista: sin
-  `defer` doble, nada arranca.
-
-### Lo que el catálogo generado evita
-
-- 730 funciones reales; el bridge envuelve 161. Catálogo en
-  `crates/heretic-daw/data/reaper-api.json` (versionado), .md generado en
-  `docs/REAPER_API.md`.
-- Ha pillado **funciones inventadas** 4 veces: `GetTrackChannelInfo`,
-  `GetActiveTrack`, `GetTrackNumber`, `TimeMap_TimeToBeats` (real:
-  `TimeMap2_timeToBeats`). Cada una, si llega al DAW, congela Reaper.
-- Regenerar: `python tools/gen_api_docs.py` (HTML -> JSON) y
-  `python tools/gen_api_md.py` (JSON -> MD). **El .md no se edita a mano.**
-
-### Un dialogo abierto NO es un DAW parado
-
-Medido con el aviso de evaluacion de Reaper en pantalla: `daw_health` decia
-`bridge: ok` con las 162 acciones mientras `daw_debug` decia CONGELADO. Los dos
-no pueden ser verdad.
-
-El aviso sale **despues** de que el bridge arranque y el bucle de ReaScript
-sigue corriendo: no bloquea nada. Un agente no puede distinguir "este dialogo
-me tapa" de "este dialogo esta aqui" mirando la ventana; solo preguntándoselo
-al DAW. Por eso `daw_debug` pregunta antes de clasificar, y el criterio es:
-
-- DAW contesta + dialogo abierto → informativo
-- DAW mudo + dialogo abierto → bloqueante, con su texto
-
-### El aviso de evaluacion de Reaper
-
-- Cambia el **texto del boton** entre arranques: "Still Evaluating" un dia,
-  "Buy Me [4]" otro. Por eso la huella mira el cuerpo ("REAPER IS NOT FREE"),
-  que no varia, y no el boton.
-- **Ignora `WM_CLOSE`**: medido, sigue en pantalla despues de enviarlo. No hay
-  forma automatica de quitarlo.
-- No bloquea el DAW (ver arriba), asi que no hace falta quitarlo. El skip es
-  una red, no un paso del arranque.
-- Nunca se pulsa un boton suyo: "buscar un boton conocido" en un dialogo de
-  licencia acaba metiendo al usuario en la tienda. Se cierra la ventana, y solo
-  si el DAW esta mudo.
-
-### El fixture que se autoniega
-
-`wav.rs` genera 4 señales con respuesta conocida. Lo importante no son los
-ficheros: es que se **verifican por fuera** (módulo `wave` de Python) y no
-con el código que las genera. Es lo único que cazó el bug de los dB, porque un
-test que comprobara "devuelve un número" habría pasado igual.
-
-Y una expectativa mía que era **falsa** y corregí: el fichero recortado NO
-tiene "mucha menos sonoridad que su pico". Al revés: recortar **aplasta las
-crestas y acerca el RMS al pico** (factor de cresta 1.07 dB frente a 3.01 de un
-sano). De ahí salió la detección de recorte.
-
-## 6c. Plugins: lo que Reaper no te cuenta (medido con epi, 2026-09-26)
-
-No había **ningún piano** instalado. 251 plugins, 4 instrumentos (Dexed,
-ReaSamplOmatic5000, ReaSynDr, ReaSynth) y ninguno es un piano. Se instaló
-**epi v0.9.0** (DatanoiseTV, GPL-3.0, 7,4 MB, VST3), que trae 5 motores de piano
-físico (Tine, E-Grand, Reed, Grand, Clav) y 2133 parámetros.
-
-### Reaper solo reescanea VST3 al arrancar
-
-`daw_setup op=rescan` lanza `Main_OnCommand(50124)`, que es *refresh all
-plug-ins*: refresca la lista ya cargada, **no busca ficheros nuevos en disco**.
-Medido: con epi instalado en la carpeta VST3 y 50124 ejecutado, `encontrado:
-false`. Hizo falta reiniciar Reaper.
-
-La carpeta `%LOCALAPPDATA%\Programs\Common\VST3` es un default de Reaper, no
-está en su config: `reaper.ini` solo tiene 3 rutas **VST2** y ninguna VST3. Una
-de ellas es `D:\Program Files\Image-Line\FL Studio 2025\System\Plugin\VSTi\x64`
-y está **vacía**, lo que cierra el pendiente de §3: no hay VSTi de FL que
-importar.
-
-### El protocolo exige cadenas JSON anidadas
-
-`midi_insert_notes_batch` hace `json_decode(p.notes)`: `notes` tiene que ser una
-**cadena** con el JSON dentro, no un array. Pasando un array da
-`Invalid notes JSON`, que no dice que el problema es ese.
-
-Los parámetros desconocidos se **ignoran en silencio**: `item_create_midi`
-documenta `position` y acepta `start_position` sin rechistar. Y el `required` del
-catálogo está incompleto: casi todas las acciones `midi_*` necesitan `item_index`
-y no lo declaran.
-
-### `fx_scan_params` está roto de origen
-
-Llama a `reaper.TrackFX_GetParameterStepCount`, que **no existe** en el catálogo
-oficial de 7.80. La real es `TrackFX_GetParameterStepSizes` y devuelve otra
-cosa. El bridge llama a 165 funciones `reaper.*` y esta es la **única**
-inventada. Falla con `attempt to call a nil value`, que el guardián convierte en
-texto. Para los parámetros con nombre sirve `fx_get_params`, que sí funciona y
-devuelve 53 de 2133 con nombre, valor y display.
-
-### El piano instalado no suena: y nada lo avisa
-
-Este es el dolor de verdad, y es de los que no se ven:
-
-| comprobación | resultado |
-|---|---|
-| `fx_list_installed` | 252 plugins, `VST3i: Epi (DatanoiseTV)` |
-| `fx_get_chain` | `fx_count: 1`, `param_count: 2133` |
-| 3 notas insertadas y releídas | `inserted_count: 3` |
-| `project_export_audio` | `rendered: true` |
-| **pico del WAV** | **−48,17 dBFS** |
-
-Todo verde y el resultado es inaudible. Lo que hay dentro:
-
-- Un componente de amplitud **fija 2⁻⁸** (~−48 dBFS) con **periodo de 3
-  muestras** (~14,7 kHz a 44,1 kHz), presente durante toda la nota.
-- No cambia con el instrumento (Tine y Grand dan lo mismo), ni con la frecuencia
-  (44,1 y 48 kHz idénticos), ni con abrir el editor del plugin.
-- **No escala con el volumen de la pista**: 0 dB da −48,183 y +40 dB da −48,166
-  (0,017 dB de diferencia). La señal musical **sí** escala (el RMS por segundo
-  pasa de −57,19 a −55,96, y la cola de −96,30 a −54,19 dBFS): lo que no escala
-  es ese componente fijo.
-- Factor de cresta 7-9 dB, así que el fichero **no** está recortado. Solo está
-  48 dB por debajo y dominado por el artefacto.
-- Con el plugin **bypasseado** el render es silencio digital (−999 dBFS), así que
-  el artefacto es de epi, no del bridge.
-
-El render de Reaper sale a **24 bits**, y el módulo `wave` de Python solo acepta
-1, 2 y 4 bytes por muestra: leerlo como int32 alineado da números inventados (me
-salió un "pico de −6 dBFS" en un fichero de 3 bytes). Hay que convertir a
-`int32 >> 8`.
-
-Conclusión: **cargado no es lo mismo que funcionando**. Un agente que solo mire
-`fx_add` y `rendered: true` dará por bueno un plugin que no suena. La única red
-es renderizar y medir el fichero, y eso son 8 llamadas y 3 scripts.
-
-## 7. `reference/`: los MCPs que estudiar
-
-Clonados, en `.gitignore` (material de referencia, no código nuestro):
-
-| | Tools | Commit | Notas |
-|---|---|---|---|
-| **xDarkzx/Reaper-MCP** | 181 | hace días | **El mejor.** CI en 3 SO × 4 versiones de Python, bridge Lua de 6049 líneas, perfiles. Base de referencia |
-| shiehn/total-reaper-mcp | 600+ | 8 semanas | Cobertura casi total, DSL natural, bridge Lua único |
-| T-Rzeznik/reaper-mcp | 55 | 2 meses | Bridge TCP propio, `Undo_BeginBlock` por operación, prefijo `reaper_`. Diseño más limpio |
-
-## 7b. El catálogo se genera del bridge, no se escribe
-
-`tools/gen_actions.py` produce `crates/heretic-daw/src/actions.rs` leyendo el
-bridge real (`%APPDATA%\REAPER\Scripts\reaper_mcp_server.lua`).
-
-Por cada handler saca dos cosas, y las dos **del código**, no de documentación:
-
-- **params**: los campos que el handler lee de `p` (`p.bpm`, `p["x"]`).
-- **required**: los que el propio handler rechaza si faltan, vía
-  `return nil, "Missing parameter: X"`.
-
-**162 acciones, 24 grupos.** Verificado en vivo:
-
-```text
-daw_catalog(domain=midi) -> 17 acciones
-  midi_delete_cc        required=['cc_index']
-  midi_delete_note      required=['note_index']
-  daw_project(info)     -> bpm 120, sample_rate 44100, 0 pistas
-  daw_health            -> bridge=ok
-```
-
-Que salga del código importa por una razón concreta: **el bridge no tiene
-docstrings por handler**, y adivinar los parámetros es el bug que más caro
-salió en FL (mandar `ms` cuando el daemon leía `position`). Reaper no avisa de
-un parámetro desconocido: usa el valor por defecto y parece que funcionó.
-
-### Trampas del naming del bridge
-
-| trampa | ejemplo |
-|---|---|
-| El prefijo va **duplicado** | `function fx.fx_add(p)` → clave pública `fx_add` |
-| Separador `_`, no punto | `transport_set_bpm`, no `transport.setTempo` |
-| Verbos en pasado | `track_create`, `project_get_info` |
-
-`crates/heretic-mcp/src/tools_tests.rs` ata las acciones que usan las tools al
-catálogo generado, para que un nombre inventado falle en `cargo test` y no
-tres horas después contra Reaper. Ya atrapó uno: `project_get_paths`, que no
-existe (es `project_get_metadata`).
-
-### Parámetros que el bridge exige de otra forma
-
-Descubiertos porque da error, no por leerlo:
-
-- `track_delete_batch` quiere `entries`, y cada entry es un **objeto**:
-  `{"track_index": 3}`. Con un índice suelto responde
-  `Entry must be an object` y no borra nada.
-
-## 8. Decisiones
+## 4. Decisiones, con su razón
 
 | Decisión | Por qué |
 |---|---|
-| Sin daemon | El agente es el proceso del cliente MCP; el HMAC entre procesos del mismo usuario no protege nada |
-| `heretic-core` se conserva | Auth, audit, tipos y protocolo ya están escritos y son reutilizables |
-| file-RPC, no `python-reapy` | Las dos dan las mismas 900+ funciones. file-RPC no mete Python dentro de Reaper, que es lo que se rompe primero (DTM, versión, bits) |
-| 7 tools, no 181 | 22.400 tokens de schemas, en cada request, para siempre |
-| Tipadas + escape hatch | El error de nombre de parámetro es silencioso en Reaper; el schema lo evita en el camino común |
-| `reference/` fuera del repo | Es material de estudio, no código nuestro |
+| **Reaper, no FL Studio** | File I/O en ReaScript y API real. FL tiene un sandbox que no permite ni abrir un fichero |
+| **Sin daemon** | El agente es un proceso del mismo usuario. Un HMAC entre los dos sería seguridad de teatro. Serialización → `Mutex`; liveness → `daw_health` |
+| **file-RPC, no Named Pipes** | Se puede depurar leyendo dos ficheros JSON. Un Named Pipe que no responde no te dice nada |
+| **10 tools, no 162** | Los 8,3 KB de schemas son tokens en cada llamada. El catálogo se consulta bajo demanda |
+| **Catálogo generado del puente** | Los parámetros salen de leer el Lua, no de documentarlo. Adivinar un parámetro es el bug que más caro salió en la etapa de FL |
+| **`daw_debug op=eval`** | 165 de las 730 funciones de la API no están envueltas. `eval` es la puerta, y va con `pcall` para que un error vuelva como texto |
+| **Fase 0 antes que innovar** | El repo afirmaba cosas falsas. Invertir en una capa de notación sobre un catálogo que miente es construir sobre arena |
+| **Expandir a la misma lista de notas** | La futura capa de notación compilationará a `midi_insert_notes_batch`, que ya funciona. Si se rompe, se cae sin arrastrar nada |
 
-## 9. Estado
+---
 
-### Hecho
-- [x] Investigacion de alternativas: Reaper es la via viable
-- [x] Reaper 7.80 instalado
-- [x] 3 MCPs clonados en `reference/` y analizados (coste real medido)
-- [x] Andamiaje `heretic-daw` con file-RPC
-- [x] Repo renombrado a `daw-heretic-mcp`
-- [x] Bridge Lua instalado y autostarteando (`__startup.lua` + supervisor)
-- [x] 162 acciones **generadas** del bridge, con params y obligatorios
-- [x] Tests que atan las tools al catalogo generado
-- [x] MCP de FL Studio y magda desconfigurados de opencode
-- [x] **Catalogo de la API real de Reaper**: 730 funciones parseadas del HTML
-      oficial de v7.80, con firma Lua, retorno y las 475 claves con nombre.
-      `docs/REAPER_API.md` **generado** (1526 lineas). Regenerable.
-- [x] Regla del prefijo `{dominio}_{sufijo}` en vez de tabla a mano, con test
-      sobre las 162 (una tabla de 40 entradas son 40 sitios donde equivocarse)
-- [x] `daw_debug`: lee y cierra el dialogo modal que congela Reaper, y ejecuta
-      Lua con `pcall` para que un error vuelva como texto y no como congelacion
-- [x] Guardián (`daw_guard.lua`) y supervisor (`daw_supervisor.lua`), versionados
-      e instalados por `daw_debug op=install`
-- [x] `daw_master`: medir con `CalculateNormalization` (LUFS-I, RMS-I, pico,
-      true pico) y normalizar. **Verificado contra la verdad externa**
-- [x] Fixture de 4 WAV con respuesta conocida, verificado por fuera con el
-      modulo `wave` de Python
-- [x] Factor de cresta (pico - RMS) como deteccion de recorte
-- [x] `tools/install_release.ps1`, probado en los dos caminos
-- [x] 76 tests
+## 5. Trampas medidas
 
-### Verificado contra Reaper real
-- `daw_track op=create`, `fx_add` (Dexed, 2241 params), 5 notas escritas y leidas
-- `daw_master op=import` + `op=measure`: los 4 deltas de 17 dB con **error 0,00**
-- `daw_debug op=eval`: Lua con `pcall`, tablas, y errores como texto
-- El supervisor arranca el bridge solo al abrir Reaper (latido vivo a los 4 s)
-- `op=restart_bridge` se niega a relanzar si el DAW contesta
+Cada una con **cómo se midió**. Una trampa sin método no es una trampa, es un
+rumor.
 
-### Pendiente, por orden
-1. [ ] **`daw_music`: componer.** Es lo unico grande que falta. El cuello es que
-        el agente calcula numeros de nota y posiciones a mano; la API tiene 41
-        funciones MIDI de las que el bridge usa 25. Es la mitad de "componer" que
-        dijimos, y va despues de "masterizar", que ya esta.
-2. [ ] E2E completo por el MCP. `tools/mcp_call.py` ya prueba el transporte, pero
-        no hay un test que vaya de project vacio a cancion.
-3. [ ] Installer automatico: bridge + `__startup.lua` + supervisor + config de
-        opencode, todo con `install_release.ps1` y sin pasos manuales.
-4. [ ] Decidir que queda de `heretic-core` (el audit log pasa de "seguridad" a
-        "observabilidad": que le cambio el agente a mi DAW)
-5. [ ] El aviso de evaluacion de Reaper no se quita de forma automatica: ignora
-        `WM_CLOSE` y su boton cambia de texto. Medido, y no bloquea, asi que es
-        una red de seguridad y no un paso del arranque.
+### Del protocolo
 
-### Changelog
-- 2026-09-26 — API real documentada, `daw_debug` y `daw_master` aí, y 9
-  bugs de fondo cazados midiendo en vez de suponiendo (ver §6b y §5b)
-## 10. Reglas para futuras sesiones
+- **Los parámetros son `snake_case`.** El puente lee `p.track_index`. Medido:
+  `track_index` funciona y `trackIndex` da `Missing parameter: track_index`. No
+  hay conversión en ninguna capa. Seis claves de las tools estaban en camelCase
+  y **`daw_track`, `daw_fx` y `daw_midi` fallaban en cuanto necesitaban un
+  índice** — y no lo veíamos porque `track_create` no necesita ninguno.
+- **Reaper no avisa de un parámetro desconocido.** Usa el valor por defecto y
+  devuelve éxito. Es el peor modo de fallo posible: un `trackIndex` mal escrito
+  parece que funcionó. Medido con `start_position` en `track_get_info`.
+- **Las estructuras anidadas van como cadena JSON.** `midi_insert_notes_batch`
+  hace `json_decode(p.notes)`: `notes` tiene que ser una **cadena** con el JSON
+  dentro, no un array. Un array da `Invalid notes JSON`, que no explica el
+  problema.
+- **`daw_project op=render` estaba muerto.** No mandaba `render_dir`,
+  `render_pattern` ni `format_code`, que son obligatorios. Arreglado: ahora
+  parte el `path` en directorio + nombre y usa `evaw` (WAV).
+- **`op=new` no puede poner nombre ni plantilla.** `PROJECT_NAME` es *read-only*
+  en la API de Reaper ("is_set will be ignored", en el catálogo oficial). La
+  descripción de la tool prometía las dos cosas; se quitó.
 
-- **Español** en conversación, **inglés** en código y docs.
-- **Probar contra el DAW real, no contra mocks.** El 100% de los bugs caros
-  pasaron los tests en local y fallaron contra FL.
-- **No compilar ni mover cosas sin luz verde** del usuario.
-- Un test que pasa unas veces y otras no es peor que uno que no pasa:
-  entrena a ignorarlo. Si algo es intermitente, se aísla o se documenta por qué.
-- Los catálogos se **generan** del bridge real, nunca se escriben a mano.
-- Lo de FL está en `git show 0930996`, no en el repo.
+### De Lua
 
-## 11. Referencias
+- **`p.end` no es Lua válido.** `end` es palabra reservada; ese campo solo se lee
+  como `p["end"]`. Un solo carácter así y el bridge **no carga**: Reaper abre
+  "ReaScript Error" en cada arranque y el diálogo **sobrevive a `WM_CLOSE`**.
+  Hay que matar el proceso. learned a la mala.
+- **No existe `TrackFX_GetParameterStepCount`.** No está en el catálogo oficial.
+  La real es `TrackFX_GetParameterStepSizes` y devuelve
+  `(retval, step, smallstep, largestep, istoggle)`. El comentario del código
+  decía "REAPER's own documented convention", que es exactamente cómo se cuela
+  una API inventada. Ahora `tools/gen_actions.py` **no genera el catálogo** si
+  el puente llama a alguna función que no exista.
 
-- **ReaScript API**: https://www.reaper.fm/sdk/reascript/reascripthelp.html
-- **python-reapy**: https://python-reapy.readthedocs.io/
-- **FL Studio como plugin**: https://www.image-line.com/fl-studio-learning/fl-studio-online-manual/html/flstudio_vst_plugin.htm
-- **Por qué Cubase tampoco vale**: https://forums.steinberg.net/t/1026258
-- **FlojoMCP** (framework): `D:\Mis Juegos\ClaudeMCPs\FlojoMCP\`
+### De Reaper
+
+- **50124 no reescanea plugins.** Es *refresh all plug-ins*: refresca la lista
+  cargada, no busca ficheros en disco. Medido: con un plugin instalado y
+  50124 ejecutado, `daw_setup op=rescan` devolvió `encontrado: false`. Hace
+  falta **reiniciar Reaper**.
+- **`Main_OnCommand` sobre un ReaScript en marcha lo destruye.** La sustituta no
+  arranca. Por eso el supervisor solo relanza al boot, donde se sabe que está
+  parado, y para relanzar en caliente está `daw_debug op=restart_bridge`, que
+  **pregunta al DAW antes** y se niega si contesta.
+- **`GetResourcePath()` no lleva separador final.** `"Scripts\\x"` →
+  `REAPERScripts\\x`, y `AddRemoveReaScript` devuelve 0 sin explicar. Usar
+  `.. "/Scripts"`.
+- **`CalculateNormalization` devuelve un factor lineal, no dB.**
+  `medido_dB = objetivo_dB - 20*log10(retorno)`. Leerlo como dB publicaba −10
+  donde era −20. Y `math.log10` **no existe** en el Lua de Reaper.
+- **`InsertMedia` devuelve `integer` (éxito), no el item.** Buscarlo por índice.
+- **La API tiene dos medidores y el puente usaba el peor.**
+  `Track_GetPeakHoldDB` es un pico **retenido** (máximo histórico): no dice qué
+  pasa ahora. `Track_GetPeakInfo` da el instantáneo y además **sonoridad en los
+  canales 1024 y 1025**. El puente nunca llama a `Track_GetPeakInfo`.
+  Ojo: la doc de `Track_GetPeakHoldDB` se contradice ("in dB*0.01" pero a la vez
+  "-0.01 = -1dB"), así que sus unidades **no están verificadas**.
+- **El render sale a 24 bits.** Está en el plan arreglarlo y verificar las
+  unidades del metro con un test.
+- **Un diálogo abierto no es un DAW parado.** El aviso de evaluación ignora
+  `WM_CLOSE`, cambia el texto de su botón entre arranques (una vez fue
+  "Buy Me [4]") y, aun así, **el DAW responde con las 162 acciones**. El
+  criterio de bloqueo es "el DAW no contesta", no "hay una ventana".
+- **`BrowseForOpenFiles` y `GetSetProjectInfo_String("RENDER_STATS")` sin la
+  pref activada** abren modales que congelan el DAW.
+- **17 de 162 acciones no cumplen `prefijo == módulo Lua`**
+  (`chops_create_virtual_slice` está en el módulo `item`, con grupo `chops`).
+  Cumplen la regla del **grupo**, que es la que usa `daw_catalog`. La afirmación
+  anterior de que "los 162 cumplen sin excepción" era falsa.
+
+### De medir
+
+- **El render de Reaper es 24 bits** y el módulo `wave` de Python solo acepta
+  1, 2 y 4 bytes por muestra. Leerlo como `int32 >> 8` mete **48,16 dB de
+  error** (`20*log10(256)`), que es una cantidad que parece un nivel de signal y
+  no un error de lectura. Y promediar L y R en vez de tomar el máximo cuesta
+  3 dB más. `tools/wav_measure.py` tiene el lector correcto **y sus fixtures**,
+  porque tres lectores erróneos concordaban entre ellos: lo que faltaba era una
+  respuesta conocida contra la que comparar.
+
+---
+
+## 6. Lo que hay que instalar antes de tocar nada
+
+```powershell
+# con opencode CERRADO: compila el release y lo deja donde lo busca opencode
+.\tools\install_release.ps1
+# con la sesion abierta, para comprobar que compila sin tocar el binario vivo
+.\tools\install_release.ps1 -Verify
+# reiniciar Reaper de forma ordenada (el bridge necesita recargar el .lua)
+.\tools\restart_reaper.ps1
+```
+
+**Sin `tools/mcp_call.py` no se puede comprobar nada de este repo**: los tests
+unitarios pasan igual con las tools rotas. `mcp_call.py` habla MCP de verdad por
+stdio y mantiene el pipe vivo; `llamar.py` es su envoltorio para PowerShell
+(manda el JSON en un fichero con `@fichero`, porque PowerShell se come las
+comillas de la línea de comandos).
+
+El aviso de "abierto" de `install_release.ps1` usa
+`[System.IO.File]::Open(..., FileShare::None)`. Medido: **`Copy-Item` sí
+funciona con un fichero abierto**, así que copiar no dice nada.
+
+---
+
+## 7. Deuda conocida
+
+1. **El puente no está en el repo.** Son 226 KB de Lua que viven en
+   `%APPDATA%\REAPER\Scripts\`, y `gen_actions.py` los lee de ahí. El repo no
+   puede reproducir su propio catálogo. **Decisión pendiente.**
+2. **No hay validación de sintaxis de Lua.** No hay `luac` en la máquina, y un
+   error de sintaxis solo se ve cuando Reaper abre el diálogo, que ya no se
+   cierra. Idea: `daw_debug op=checklua` con `loadfile`, que da el error exacto.
+3. **Las unidades del metro no están verificadas** (ver §5).
+4. **El bridge ignora los parámetros desconocidos.** Debería rechazararlos, o
+   al menos `daw_do` debería, ya que el catálogo sabe qué se espera.
+5. **`fx_scan_params` arreglado pero sin probar contra un plugin de verdad.**
+6. **El supervisor no relanza en caliente** a propósito; falta una forma
+   cómoda de hacerlo que no destruya la instancia buena.
+
+---
+
+## 8. Plan de fases
+
+### Fase 0 — Deuda ✅ *hecha el 2026-09-26*
+- Reescrito `AGENTS.md` (esta versión): fuera lo que se demostró falso.
+- `gen_actions.py` es ahora una **puerta**: no genera si el puente llama a una
+  API inexistente. Caza `TrackFX_GetParameterStepCount`.
+- El generador **sigue a los helpers**, así que `required` es real: 49 acciones
+  lo ganaron, ninguna lo perdió. Antes 9 de 17 `midi_*` decían no pedir nada
+  cuando `get_midi_take(p)` les exige `item_index`.
+- Arregladas las 6 claves camelCase de las tools.
+- Arreglado `daw_project op=render` (estaba muerto) y `op=new` (prometía lo que
+  no existe).
+- 5 tests nuevos que atan las tools al catálogo del bridge.
+- `tools/wav_measure.py` con lector correcto y fixtures.
+- **81 tests, 0 fallos.** Verificado contra Reaper: `daw_track op=rename`,
+  `daw_fx op=get_chain` y `daw_project op=render` funcionan.
+
+### Fase 1 — Verdad proactiva
+- `daw_health` como snapshot: srate de proyecto y de render, `Audio_IsRunning`,
+  transporte, bpm/compás, ítems, notas.
+- `daw_master op=meter`: pico **instantáneo** (`Track_GetPeakInfo`, no el
+  retenido) + sonoridad por los canales 1024/1025, master y pistas.
+- El render devuelve un **resultado**: pico, LUFS, duración, y "silencio
+  digital" explícito. Hoy devuelve `rendered: true` y nada más.
+- `daw_master op=probe_instrument`: "¿suena?" en una llamada.
+
+### Fase 2 — Notación (la innovación)
+MIDI-en-JSON es la peor interfaz posible para un LLM: unidad equivocada (beats
+absolutos en vez de compases), pitch numerado, y **no expresa estructura** —en
+JSON no existe "igual que el compás 1"—. La capa de notación sería
+bar-relativo y con nombres de nota, y **expandiría a la lista de notas que ya
+funciona**. En Rust, que se testea; no en Lua.
+
+### Fase 3 — Generadores y operaciones
+Una pieza de piano es ~20 % melodía (exacta) y ~80 % figuración (repetitiva por
+definición). Los generadores atacan el 80 %: `alberti16`, `arpegio8`, `escala`.
+Y operaciones en vez de reescrituras, para que cambiar 8 notas no regenere 200.
+
+### Fase 4 — Reorganización
+El corte en 10 tools frente a 162 acciones está por justificar. Y el catálogo,
+que debería ser la spec del agente, hoy miente en `required` y en tipos.
+
+---
+
+## 9. Reglas para futuras sesiones
+
+- **Probar contra el DAW real.** Un test que pase intermitentemente es peor que
+  uno que no pase; uno que no prueba nada es peor que no tener test.
+- **La API no se escribe de memoria.** Se genera del HTML oficial. Si no está
+  en el fichero generado, no se inventa. Catálogos generados **no se editan a
+  mano**.
+- **Toda cifra de este documento con cómo se midió**, o no vale.
+- **Una decisión por pregunta.**
+- Español en conversación, inglés en código y docs. **Brutalmente honesto** en
+  auditorías: pintar nada bonito es lo que rompio este repo una vez.
+- **Probar un script antes de darlo por bueno.** Los tres ultimos reviewers un `$raiz` con un `Split-Path` de más, un `assert` que contaba
+  6 donde había 8, y un fichero de tests **pisado** por otro nuevo.
+- Al tocar el puente: copia de seguridad, `loadfile` para la sintaxis, y
+  `gen_actions.py` antes de compilar.
+
+---
+
+## 10. Referencias
+
+- **Catálogo generado:** `crates/heretic-daw/data/reaper-api.json` (730
+  funciones) y `docs/REAPER_API.md` (1.526 líneas, generado, no editar).
+- **Generadores:** `tools/gen_api_docs.py` (HTML→JSON), `tools/gen_api_md.py`
+  (JSON→MD), `tools/gen_actions.py` (bridge→Rust, con puerta).
+- **Arnes:** `tools/mcp_call.py`, `tools/llamar.py`, `tools/wav_measure.py`.
+- **Instalación:** `tools/install_release.ps1`, `tools/restart_reaper.ps1`.
+- **API de Reaper:** https://www.reaper.fm/sdk/reaper/reaper_wwwroot.html
