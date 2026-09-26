@@ -15,18 +15,25 @@
 //!   metro en dB*0.01
 //! ```
 //!
-//! # El truco del objetivo cero
+//! # El objetivo cero, y el error que casi se cuela
 //!
-//! `CalculateNormalization` no devuelve "la sonoridad": devuelve **cuanto
-//! hay que mover** para llegar a un objetivo. Pidiendo objetivo `0` dB la
-//! respuesta es la propia medida con el signo cambiado:
+//! `CalculateNormalization` no devuelve "la sonoridad": devuelve **el factor
+//! de ganancia lineal** que hay que aplicar para llegar a un objetivo. Es un
+//! multiplicador, no decibelios.
+//!
+//! La conversion correcta es:
 //!
 //! ```text
-//! medido = objetivo - ajuste  ->  medido = -ajuste
+//! medido_dB = objetivo_dB - 20 * log10(retorno)
 //! ```
 //!
-//! asi que una sola funcion da las cuatro medidas, y no hay que saber ningun
-//! valor de referencia para empezar.
+//! Con objetivo `0` queda `medido_dB = -20 * log10(retorno)`.
+//!
+//! Esto se dio por bueno un rato entero y salio mal: leyendo el retorno como si
+//! fueran dB, un WAV de -20 dBFS se informaba como -10 dBFS. Lo que de verdad
+//! lo cazo fue el fixture con respuesta conocida —el WAV cuyo pico se mide a
+//! mano con el modulo `wave` de Python—, no un test. Un test que comprobara
+//! "devuelve un numero" habria pasado igual.
 //!
 //! # Lo que esta tool NO hace
 //!
@@ -62,10 +69,26 @@ if not take then return {{ error = "el item {item} no tiene take" }} end
 local src = reaper.GetMediaItemTake_Source(take)
 if not src then return {{ error = "el take no tiene source" }} end
 
+-- OJO: `CalculateNormalization` devuelve un FACTOR DE GANANCIA LINEAL, no
+-- decibelios. Costo una sesion entera decreerlo, y un fixture con respuesta
+-- conocida lo cazo a la primera.
+--
+-- La prueba: para el WAV de -20 dBFS devuelve 9.999, y 20*log10(9.999) es
+-- 20.00 clavado. Variando el objetivo a -6 y +6 devuelve 5.012 y 19.951, y
+-- -6 - 20*log10(5.012) y 6 - 20*log10(19.951) dan ambos -20.00. O sea:
+--
+--     medido_dB = objetivo_dB - 20 * log10(retorno)
+--
+-- Si se devuelve el valor tal cual y se le pone "dB" delante, todo queda
+-- desplazado de forma systematica y parece una medicion.
+-- Y `math.log10` NO EXISTE en el Lua de Reaper: devuelve nil y el payload
+-- revienta con "attempt to call a nil value (field 'log10')". Comprobado:
+-- `math.log` si esta, `math.log10` no. De ahi la division.
+local LN10 = math.log(10)
 local function norm(to)
-  local ok, d = pcall(reaper.CalculateNormalization, src, to, 0, 0, 0)
-  if not ok or not d then return nil end
-  return -d
+  local ok, f = pcall(reaper.CalculateNormalization, src, to, 0, 0, 0)
+  if not ok or not f or f <= 0 then return nil end
+  return 0 - 20 * (math.log(f) / LN10)   -- objetivo 0
 end
 
 return {{
@@ -177,13 +200,19 @@ local idx = reaper.CountTracks(0)
 reaper.InsertTrackAtIndex(idx, true)
 local tr = reaper.GetTrack(0, idx)
 reaper.SetOnlyTrackSelected(tr)
-local it = reaper.InsertMedia(ruta, 0)
-if not it then return {{ error = "InsertMedia no devolvio item" }} end
+-- OJO: `InsertMedia` devuelve un ENTERO (si tuvo exito), no el item. Leyendo
+-- el catalogo: "integer reaper.InsertMedia(string file, integer mode)".
+-- Pasarselo a GetMediaItemInfo_Value da "bad argument" y el item nunca se
+-- localiza, asi que el item se busca por indice en la pista.
+local ok = reaper.InsertMedia(ruta, 0)
+if not ok or ok == 0 then return {{ error = "InsertMedia no inserto nada" }} end
 reaper.UpdateArrange()
+local n = reaper.CountTrackMediaItems(tr)
+if n == 0 then return {{ error = "la pista quedo vacia tras importar" }} end
+local it = reaper.GetTrackMediaItem(tr, n - 1)
 return {{
   pista = idx,
-  item = reaper.CountTrackMediaItems(tr) - 1,
-  nombre_item = reaper.GetMediaItemInfo_Value(it, "D_POSITION"),
+  item = n - 1,
   duracion_s = reaper.GetMediaItemInfo_Value(it, "D_LENGTH"),
 }}
 "#

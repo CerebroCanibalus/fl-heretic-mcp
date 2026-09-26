@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 """Genera `docs/REAPER_API.md` desde los datos ya parseados.
 
 El .md esta GENERADO. Si lo editas a mano, la proxima vez que se ejecute este

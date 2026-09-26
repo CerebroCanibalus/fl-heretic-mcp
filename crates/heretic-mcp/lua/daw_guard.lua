@@ -80,7 +80,10 @@ local function enc(v, depth)
   return "{" .. table.concat(partes, ",") .. "}"
 end
 
-local path = reaper.GetResourcePath() .. "Scripts\\daw_payload.lua"
+-- OJO: `GetResourcePath()` no lleva separador final. Con `"Scripts\\x"`
+-- sale `REAPERScripts\\x` y el payload no se encuentra nunca. El bridge
+-- hace lo mismo con barra normal, y por eso funciona.
+local path = reaper.GetResourcePath() .. "/Scripts/daw_payload.lua"
 local f = io.open(path, "rb")
 if not f then
   set('{"ok":false,"error":"no hay payload en ' .. esc(path) .. '"}')

@@ -70,36 +70,58 @@ pub struct WinInfo {
     pub title: String,
     pub pid: u32,
     pub visible: bool,
-    /// `(hwnd, texto)` de los controles hijos con texto: botones y etiquetas.
-    pub children: Vec<(Hwnd, String)>,
+    /// Controles hijos con texto: `(hwnd, clase, texto)`.
+    ///
+    /// La clase importa: llamar "boton" a cualquier texto corto fue un error
+    /// mio que casi Mikkelsen's el aviso de licencia de Reaper, que tiene
+    /// controles que se leen como botones y no lo son.
+    pub children: Vec<(Hwnd, String, String)>,
 }
 
 impl WinInfo {
-    /// Primer botón cuyo texto encaja con alguno de `nombres` (sin distinguir
-    /// mayúsculas, tolerando el `&` de los mnemónicos: `&No`, `&S�`).
+    /// Botones (clase `Button`) cuyo texto encaja con alguno de `nombres`.
+    ///
+    /// Sin distinguir mayúsculas y tolerando el `&` de los mnemonicos: `&No`,
+    /// `&Si`. Solo clase `Button`: un `Static` con el texto "OK" no se pulsa.
     pub fn boton(&self, nombres: &[&str]) -> Option<Hwnd> {
-        let norm = |s: &str| s.trim_start_matches('&').to_lowercase();
+        let botones: Vec<&(Hwnd, String, String)> =
+            self.children.iter().filter(|(_, c, _)| c == "Button").collect();
+        let norm = |s: &str| s.trim_start_matches('&').trim().to_lowercase();
         for objetivo in nombres {
-            for (h, t) in &self.children {
-                if t.is_empty() {
-                    continue;
-                }
-                let cn = t.to_lowercase();
-                let cn = cn.trim_start_matches('&');
-                if norm(t) == norm(objetivo) || cn == objetivo.to_lowercase() {
+            for (h, _, t) in &botones {
+                if norm(t) == norm(objetivo) {
                     return Some(*h);
                 }
             }
         }
         // Segunda pasada: coincidencia por contenido, para "End script (x)".
         for objetivo in nombres {
-            for (h, t) in &self.children {
-                if t.to_lowercase().contains(&objetivo.to_lowercase()) {
+            for (h, _, t) in &botones {
+                if norm(t).contains(&objetivo.to_lowercase()) {
                     return Some(*h);
                 }
             }
         }
         None
+    }
+
+    /// Textos de los botones, para informar de lo que hay.
+    pub fn botones(&self) -> Vec<&str> {
+        self.children
+            .iter()
+            .filter(|(_, c, _)| c == "Button")
+            .map(|(_, _, t)| t.as_str())
+            .collect()
+    }
+
+    /// Controles que NO son botones, para no llamarles de cualquier forma.
+    pub fn otros_controles(&self) -> Vec<&str> {
+        self.children
+            .iter()
+            .filter(|(_, c, _)| c != "Button")
+            .map(|(_, _, t)| t.as_str())
+            .filter(|t| !t.trim().is_empty())
+            .collect()
     }
 }
 
@@ -120,10 +142,11 @@ unsafe fn texto(h: Hwnd, clase_o_texto: bool) -> String {
 }
 
 unsafe extern "system" fn cb_hijos(h: Hwnd, l: *mut c_void) -> i32 {
-    let acc = unsafe { &mut *(l as *mut Vec<(Hwnd, String)>) };
+    let acc = unsafe { &mut *(l as *mut Vec<(Hwnd, String, String)>) };
     let t = unsafe { texto(h, false) };
     if !t.is_empty() {
-        acc.push((h, t));
+        let c = unsafe { texto(h, true) };
+        acc.push((h, c, t));
     }
     1
 }
@@ -162,7 +185,7 @@ pub fn ventanas(pid: u32) -> Vec<WinInfo> {
 /// recorrido de hijos es el caro y no siempre hace falta.
 pub fn con_hijos(mut ws: Vec<WinInfo>) -> Vec<WinInfo> {
     for w in ws.iter_mut() {
-        let mut acc: Vec<(Hwnd, String)> = Vec::new();
+        let mut acc: Vec<(Hwnd, String, String)> = Vec::new();
         unsafe { EnumChildWindows(w.hwnd, cb_hijos, &mut acc as *mut _ as *mut c_void) };
         w.children = acc;
     }
@@ -217,9 +240,9 @@ mod tests {
     fn el_boton_ignora_los_mnemonicos_ampersand() {
         let w = WinInfo {
             children: vec![
-                (1, "&No".into()),
-                (2, "&Continuar".into()),
-                (3, String::new()),
+                (1, "Button".into(), "&No".into()),
+                (2, "Button".into(), "&Continuar".into()),
+                (3, "Button".into(), String::new()),
             ],
             ..Default::default()
         };
@@ -230,9 +253,26 @@ mod tests {
     }
 
     #[test]
+    fn un_static_que_dice_ok_no_es_un_boton() {
+        // El aviso de licencia de Reaper tiene controles que se leen como
+        // botones. Pulsarlos sin querer es tocar la licencia del usuario.
+        let w = WinInfo {
+            children: vec![
+                (1, "Static".into(), "OK".into()),
+                (2, "Button".into(), "Close".into()),
+            ],
+            ..Default::default()
+        };
+        assert_eq!(w.boton(&["ok"]), None, "un Static no se pulsa");
+        assert_eq!(w.boton(&["close"]), Some(2));
+        assert_eq!(w.botones(), vec!["Close"]);
+        assert_eq!(w.otros_controles(), vec!["OK"]);
+    }
+
+    #[test]
     fn el_boton_cae_a_coincidencia_parcial_para_textos_con_sufijo() {
         let w = WinInfo {
-            children: vec![(7, "End script (daw_probe.lua)".into())],
+            children: vec![(7, "Button".into(), "End script (daw_probe.lua)".into())],
             ..Default::default()
         };
         assert_eq!(w.boton(&["end script"]), Some(7));
@@ -249,3 +289,4 @@ mod tests {
         }
     }
 }
+

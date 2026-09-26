@@ -57,15 +57,47 @@ fn bridge() -> std::result::Result<ReaperBridge, ToolError> {
 
 fn call(action: &str, params: Value) -> std::result::Result<Value, ToolError> {
     let b = bridge()?;
-    b.call(action, params).map_err(|e| {
-        // El error mas comun es "el bridge no responde", y la causa quase
+    let primer = b.call(action, params.clone());
+
+    // Un reintento, solo si el DAW no contestar y habia un dialogo conocido
+    // tapandole. El aviso de evaluacion de Reaper sale en cada arranque y es
+    // MODAL: sin esto, la primera tool tras arrancar se come un timeout, y el
+    // agente no tiene forma de mirar una pantalla para enterarse.
+    //
+    // Un reintento y nada mas: si el dialogo no estaba, sigue fallando igual
+    // y el error que sube es el de verdad, no uno diluido.
+    // El reintento se hace en el mismo tipo de error que devuelve el bridge;
+    // el mapeo a `ToolError` con la pista viene despues, una sola vez.
+    let r: Result<Value, heretic_daw::RpcError> = match primer {
+        Ok(v) => Ok(v),
+        Err(e) if crate::debug::es_timeout(&e.to_string()) => {
+            match crate::debug::cerrar_molestia(true) {
+                Some(m) => {
+                    // Un instante para que Windows retire el dialogo.
+                    std::thread::sleep(std::time::Duration::from_millis(400));
+                    b.call(action, params).map_err(|e2| {
+                        heretic_daw::RpcError::Remote(format!(
+                            "Reaper estaba tapado por un dialogo ({m}); se cerro y aun asi \
+                             no responde: {e2}"
+                        ))
+                    })
+                }
+                None => Err(e),
+            }
+        }
+        Err(e) => Err(e),
+    };
+
+    r.map_err(|e| {
+        // El error mas comun es "el bridge no responde", y la causa casi
         // siempre es la misma: el ReaScript no esta corriendo dentro de Reaper.
         // Decirlo ahorra al LLM un ciclo entero de prueba y error.
         let m = e.to_string();
-        let hint = if m.contains("no respondio") || m.contains("Timeout") {
+        let hint = if crate::debug::es_timeout(&m) {
             " El bridge Lua no responde. Comprueba con daw_health: normalmente \
              significa que el ReaScript no esta corriendo dentro de Reaper \
-             (Actions > Show action list > ReaScript > cargarlo y darle a Run)."
+             (Actions > Show action list > ReaScript > cargarlo y darle a Run). \
+             Si daw_health dice que hay un dialogo bloqueando, daw_debug op=modal."
         } else {
             ""
         };

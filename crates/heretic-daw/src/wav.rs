@@ -1,34 +1,34 @@
-﻿//! Generador de WAV de prueba.
+//! Generador de WAV de prueba.
 //!
-//! ## Por quÃ© existe
+//! ## Por qué existe
 //!
 //! Una tool de master que no se puede verificar no sirve. Y no se puede
-//! verificar mirando el nÃºmero que devuelve Reaper y "`confia en mi`": hay que
+//! verificar mirando el número que devuelve Reaper y "`confia en mi`": hay que
 //! comprobarlo contra algo.
 //!
 //! Estos ficheros son las respuestas:
 //!
-//! | fichero | quÃ© es | quÃ© DEBE dar la mediciÃ³n |
+//! | fichero | qué es | qué DEBE dar la medición |
 //! |---|---|---|
 //! | `sine_1k_20db.wav` | 1 kHz a -20 dBFS | LUFS-I cerca de -20, pico -20 dBTP |
 //! | `sine_1k_3db.wav` | 1 kHz a -3 dBFS | ~17 dB por encima del anterior |
-//! | `clipped.wav` | 1 kHz a +6 dBFS recortado duro | pico 0 dBTP, y **factor de cresta de 1.07 dB en vez de 3.01**: las crestas estÃ¡n aplastadas |
+//! | `clipped.wav` | 1 kHz a +6 dBFS recortado duro | pico 0 dBTP, y **factor de cresta de 1.07 dB en vez de 3.01**: las crestas están aplastadas |
 //! | `noise.wav` | ruido blanco a -18 dBFS | RMS cercano a -18, LUFS menor que el pico |
 //!
-//! ## El factor de cresta, y por quÃ© importa `clipped.wav`
+//! ## El factor de cresta, y por qué importa `clipped.wav`
 //!
-//! EscribÃ­ aquÃ­ que el fichero recortado tendrÃ­a "mucha menos sonoridad que su
-//! pico", y es al revÃ©s. Medido: el seno limpio tiene un factor de cresta de
+//! Escribí aquí que el fichero recortado tendría "mucha menos sonoridad que su
+//! pico", y es al revés. Medido: el seno limpio tiene un factor de cresta de
 //! 3.01 dB (RMS 3 dB por debajo del pico, que es lo de toda onda senoidal) y
 //! el recortado solo 1.07 dB.
 //!
 //! Es decir: **recortar aplasta las crestas y acerca el RMS al pico**. Y eso es
-//! exactamente la firma del recorte, medible con dos nÃºmeros que ya tenÃ­a:
+//! exactamente la firma del recorte, medible con dos números que ya tenía:
 //! `pico - rms`. Un masterizer que solo mira el pico no ve nada raro â€” 0 dBTP
 //! es "un pico alto"â€”, pero un factor de cresta de 1 dB sobre 3 dB es un
 //! archivo destrozado.
 //!
-//! La lecciÃ³n se queda en el repo porque es del tipo de expectativa que hace
+//! La lección se queda en el repo porque es del tipo de expectativa que hace
 //! que un test pase sin comprobar nada.
 //!
 //! ## Formato
@@ -62,7 +62,7 @@ pub struct Senal {
     pub descripcion: &'static str,
     /// dbFS nominal, antes de recortar.
     pub dbfs: f32,
-    /// Si es `Some`, se recorta duro a Â±1.0 (el "clipped" del masterizado).
+    /// Si es `Some`, se recorta duro a ±1.0 (el "clipped" del masterizado).
     pub recortar: bool,
     /// `true` = ruido blanco; `false` = seno.
     pub ruido: bool,
@@ -105,7 +105,7 @@ pub const SENALES: &[Senal] = &[
 ];
 
 /// LCG determinista: un WAV de prueba tiene que ser **el mismo** en cada
-/// ejecuciÃ³n, o dos mediciones no son comparables.
+/// ejecución, o dos mediciones no son comparables.
 fn ruido_uniforme(semilla: &mut u64) -> f32 {
     *semilla = semilla.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
     // 24 bits del estado alto, mapeados a [-1, 1)
@@ -113,7 +113,7 @@ fn ruido_uniforme(semilla: &mut u64) -> f32 {
     v
 }
 
-/// Genera las muestras en [-1, 1] de una seÃ±al.
+/// Genera las muestras en [-1, 1] de una señal.
 pub fn muestras(s: &Senal) -> Vec<f32> {
     let n = (TASA as f32 * s.segundos) as usize;
     let amp = db_a_lineal(s.dbfs);
@@ -148,7 +148,7 @@ pub fn a_wav(muestras: &[f32]) -> Vec<u8> {
     w.extend_from_slice(&((36 + datos.len()) as u32).to_le_bytes());
     w.extend_from_slice(b"WAVE");
     w.extend_from_slice(b"fmt ");
-    w.extend_from_slice(&16u32.to_le_bytes()); // tamaÃ±o del bloque fmt
+    w.extend_from_slice(&16u32.to_le_bytes()); // tamaño del bloque fmt
     w.extend_from_slice(&1u16.to_le_bytes()); // PCM sin comprimir
     w.extend_from_slice(&1u16.to_le_bytes()); // mono
     w.extend_from_slice(&TASA.to_le_bytes());
@@ -161,7 +161,7 @@ pub fn a_wav(muestras: &[f32]) -> Vec<u8> {
     w
 }
 
-/// Escribe una seÃ±al en `dir`. Devuelve la ruta.
+/// Escribe una señal en `dir`. Devuelve la ruta.
 pub fn escribir(dir: &Path, s: &Senal) -> io::Result<std::path::PathBuf> {
     std::fs::create_dir_all(dir)?;
     let p = dir.join(s.nombre);
@@ -169,7 +169,7 @@ pub fn escribir(dir: &Path, s: &Senal) -> io::Result<std::path::PathBuf> {
     Ok(p)
 }
 
-/// Escribe las cuatro seÃ±ales de prueba.
+/// Escribe las cuatro señales de prueba.
 pub fn escribir_todas(dir: &Path) -> io::Result<Vec<(String, String, std::path::PathBuf)>> {
     let mut out = Vec::new();
     for s in SENALES {
@@ -198,8 +198,8 @@ pub fn diagnostico_de_cresta(pico_dbfs: f64, rms_db: f64) -> (&'static str, Stri
         if c < 2.0 {
             ("recortado", format!(
                 "pico en {pico_dbfs:.1} dBTP y factor de cresta de solo {c:.1} dB. \
-                 Es un archivo recortado: las crestas estÃ¡n aplastadas y al \
-                 codificar se oirÃ¡ distorsion. Es el caso que hay que \
+                 Es un archivo recortado: las crestas están aplastadas y al \
+                 codificar se oirá distorsion. Es el caso que hay que \
                  remasterizar."))
         } else {
             ("sin_margin", format!(
