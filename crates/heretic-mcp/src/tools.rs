@@ -55,7 +55,7 @@ fn bridge() -> std::result::Result<ReaperBridge, ToolError> {
     Ok(ReaperBridge::new(cfg))
 }
 
-fn call(action: &str, params: Value) -> std::result::Result<Value, ToolError> {
+pub(crate) fn call(action: &str, params: Value) -> std::result::Result<Value, ToolError> {
     let b = bridge()?;
     let primer = b.call(action, params.clone());
 

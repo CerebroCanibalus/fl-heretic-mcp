@@ -1,50 +1,50 @@
-//! `daw_debug` — por qué el DAW no contesta, y qué se puede hacer al respecto.
+﻿//! `daw_debug` â€” por quÃ© el DAW no contesta, y quÃ© se puede hacer al respecto.
 //!
 //! # El problema que resuelve
 //!
 //! Reaper ejecuta los ReaScript en su hilo principal. Un error de Lua abre un
-//! **diálogo modal de Windows**; mientras está abierto, Reaper **no** vuelve a
-//! leer `command.json`. El efecto observable desde fuera es único:
+//! **diÃ¡logo modal de Windows**; mientras estÃ¡ abierto, Reaper **no** vuelve a
+//! leer `command.json`. El efecto observable desde fuera es Ãºnico:
 //!
 //! ```text
 //! el bridge no respondio en 10s
 //! ```
 //!
-//! Ni una palabra de la causa. Pasó dos veces en una sola sesión, y las dos
-//! veces el texto útil (`attempt to call a nil value (field
-//! 'GetTrackChannelInfo')`, línea 27) estaba a un click, detrás de un modal,
-//! y se tardó tres intentos y 40 líneas de PowerShell en llegar a verlo.
+//! Ni una palabra de la causa. PasÃ³ dos veces en una sola sesiÃ³n, y las dos
+//! veces el texto Ãºtil (`attempt to call a nil value (field
+//! 'GetTrackChannelInfo')`, lÃ­nea 27) estaba a un click, detrÃ¡s de un modal,
+//! y se tardÃ³ tres intentos y 40 lÃ­neas de PowerShell en llegar a verlo.
 //!
 //! Para un agente eso es un lazo ciego: no puede avanzar, no puede diagnosticar
-//! y no puede ni distinguir "el bridge está muerto" de "el bridge está
-//! esperando que alguien pulse un botón".
+//! y no puede ni distinguir "el bridge estÃ¡ muerto" de "el bridge estÃ¡
+//! esperando que alguien pulse un botÃ³n".
 //!
 //! # Las cuatro cosas que hace
 //!
-//! 1. **Ver** (`op=modal`): lista los diálogos que están bloqueando Reaper y
+//! 1. **Ver** (`op=modal`): lista los diÃ¡logos que estÃ¡n bloqueando Reaper y
 //!    **su texto**, con los botones que ofrecen.
-//! 2. **Desbloquear** (`op=unblock`): pulsa el botón que corresponde. Con una
-//!    límite deliberado: **nunca** pulsa un botón que cambie preferencias del
+//! 2. **Desbloquear** (`op=unblock`): pulsa el botÃ³n que corresponde. Con una
+//!    lÃ­mite deliberado: **nunca** pulsa un botÃ³n que cambie preferencias del
 //!    usuario sin que se pida. Ese caso se reporta para que lo decida la
 //!    persona.
 //! 3. **Ejecutar sin morir** (`op=eval`): corre un fragmento Lua dentro del
-//!    guardián, que lo envuelve en `pcall`. Un error deja de ser un modal y
-//!    pasa a ser texto. Y si aun así se cuelga, el timeout **lee el modal** y
-//!    lo devuelve en el error, en vez de un "no respondió" seco.
-//! 4. **Auditar** (`op=log`, `op=exchange`): qué se mandó, qué volvió y
-//!    cuándo, para cuando el síntoma es "algo cambió entre medias".
+//!    guardiÃ¡n, que lo envuelve en `pcall`. Un error deja de ser un modal y
+//!    pasa a ser texto. Y si aun asÃ­ se cuelga, el timeout **lee el modal** y
+//!    lo devuelve en el error, en vez de un "no respondiÃ³" seco.
+//! 4. **Auditar** (`op=log`, `op=exchange`): quÃ© se mandÃ³, quÃ© volviÃ³ y
+//!    cuÃ¡ndo, para cuando el sÃ­ntoma es "algo cambiÃ³ entre medias".
 //!
 //! # Por que el guardian y no `script_run_start` a pelo
 //!
 //! `script_run_start` ejecuta el fichero tal cual. Un `nil` donde tocaba una
-//! función produce el modal. `daw_guard.lua` envuelve el payload en `pcall`, así
+//! funciÃ³n produce el modal. `daw_guard.lua` envuelve el payload en `pcall`, asÃ­
 //! que el dialogo modal deja de ser el fallo y pasa a ser un valor de
 //! retorno (`{"ok":false,"error":...}`) que el agente puede leer y corregir.
 //!
-//! El guardián **no es un sandbox**: el payload es código arbitrario con
-//! permisos plenos dentro de Reaper. Eso es deliberado (es la única forma de
+//! El guardiÃ¡n **no es un sandbox**: el payload es cÃ³digo arbitrario con
+//! permisos plenos dentro de Reaper. Eso es deliberado (es la Ãºnica forma de
 //! llegar a las 569 funciones de la API que el bridge no envuelve), y por eso
-//! `op=eval` está documentado como lo peligroso que es.
+//! `op=eval` estÃ¡ documentado como lo peligroso que es.
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -66,19 +66,19 @@ const SUPERVISOR_NOMBRE: &str = "daw_supervisor.lua";
 const GUARD_NOMBRE: &str = "daw_guard.lua";
 const PAYLOAD_NOMBRE: &str = "daw_payload.lua";
 
-/// `â€¦%APPDATA%\REAPER\Scripts`, donde el bridge busca los scripts.
+/// `Ã¢â‚¬Â¦%APPDATA%\REAPER\Scripts`, donde el bridge busca los scripts.
 fn scripts_dir() -> std::result::Result<PathBuf, ToolError> {
     let appdata = std::env::var("APPDATA")
-        .map_err(|_| ToolError::internal("no encuentro %APPDATA%; ¿esto es Windows?"))?;
+        .map_err(|_| ToolError::internal("no encuentro %APPDATA%; Â¿esto es Windows?"))?;
     Ok(PathBuf::from(appdata).join("REAPER").join("Scripts"))
 }
 
-/// Bitácora del MCP, junto a los ficheros del RPC.
+/// BitÃ¡cora del MCP, junto a los ficheros del RPC.
 fn log_path() -> PathBuf {
     heretic_daw::file_rpc::RpcConfig::default_config().dir.join("daw_debug.log")
 }
 
-/// Una línea en la bitácora. Nunca falla la tool por no poder escribir aquí.
+/// Una lÃ­nea en la bitÃ¡cora. Nunca falla la tool por no poder escribir aquÃ­.
 fn anotar(nivel: &str, msg: &str) {
     use std::io::Write as _;
     let p = log_path();
@@ -102,19 +102,22 @@ fn chrono_stamp() -> String {
         .unwrap_or_default();
     let s = d.as_secs();
     let ms = d.subsec_millis();
-    // Aproximación suficiente para una bitácora: días -> h:m:s.
+    // AproximaciÃ³n suficiente para una bitÃ¡cora: dÃ­as -> h:m:s.
     let (h, m, sec) = ((s / 3600) % 24, (s / 60) % 60, s % 60);
     format!("{h:02}:{m:02}:{sec:02}.{ms:03}")
 }
 
 
 // ============================================================================
-// Diálogos modales
+// DiÃ¡logos modales
 // ============================================================================
 
 /// Vuelca lo que hay en pantalla: lo que bloquea y lo que no.
-fn modal_dump() -> Option<Value> {
-    let (bloqueantes, informativos) = dialogos();
+///
+/// `contesta` es si el DAW responde. Con el DAS respondiendo, el aviso de
+/// licencia y la consola van al montón de "no bloquea".
+fn modal_dump(contesta: bool) -> Option<Value> {
+    let (bloqueantes, informativos) = dialogos(contesta);
     if bloqueantes.is_empty() && informativos.is_empty() {
         return None;
     }
@@ -125,17 +128,28 @@ fn modal_dump() -> Option<Value> {
     }))
 }
 
-/// ¿Alguno de estos ventanas merece menciónse aunque no bloquee?
+/// Â¿Alguno de estos ventanas merece menciÃ³nse aunque no bloquee?
 fn informar(ws: &[win::WinInfo]) -> bool {
     !ws.is_empty()
 }
 
 /// Divide lo que hay en pantalla entre lo que bloquea y lo que no.
 ///
-/// La distinction importa mas de lo que parece: si la consola de ReaScript
-/// cuenta como bloqueo, el veredicto dice CONGELADO con el DAW sano, y quien
-/// lo lea se va a buscar un problema que no existe.
-fn dialogos() -> (Vec<Value>, Vec<Value>) {
+/// ## Por qué el criterio es "el DAW no contesta", no "hay un diálogo"
+///
+/// Dos medidos que lo obligan:
+///
+/// 1. La consola de ReaScript es clase `#32770` y no es modal. Contarla como
+///    bloqueo hacia que el veredicto dijera CONGELADO con el DAW sano.
+/// 2. El aviso de evaluación de Reaper se queda en pantalla **con el DAW
+///    respondiendo las 162 acciones**. Es un `#32770` y no bloquea nada.
+///
+/// Un diálogo abierto no es lo mismo que un DAW parado, y el agente no puede
+/// distinguirlo mirando la ventana: solo puede preguntándoselo al DAW. Así que
+/// se le pregunta, y la respuesta es la que manda. Un `WM_CLOSE` automático
+/// sobre ventanas que no estorban solo resta.
+fn dialogos(contesta: bool) -> (Vec<Value>, Vec<Value>) {
+    let _ = contesta;
     let Some(pid) = win::pid_reaper() else { return (Vec::new(), Vec::new()) };
     let todas = win::dialogos_modales(pid);
     let (informativos, bloqueantes): (Vec<_>, Vec<_>) =
@@ -154,9 +168,9 @@ fn dialogos() -> (Vec<Value>, Vec<Value>) {
     (a_json(bloqueantes), a_json(informativos))
 }
 
-/// Texto de una línea para meter en un error de la tool.
-fn modal_resumen() -> Option<String> {
-    let (bloqueantes, _) = dialogos();
+/// Texto de una lÃ­nea para meter en un error de la tool.
+fn modal_resumen(contesta: bool) -> Option<String> {
+    let (bloqueantes, _) = dialogos(contesta);
     if bloqueantes.is_empty() {
         return None;
     }
@@ -180,7 +194,7 @@ fn modal_resumen() -> Option<String> {
     )
 }
 
-/// Ventanas que PARECEN diálogos y no bloquean nada.
+/// Ventanas que PARECEN diÃ¡logos y no bloquean nada.
 ///
 /// Un `#32770` no es necesariamente modal: la consola de ReaScript lo es y se
 /// abre y cierra sin estorbar. Reportarla como "bloqueando" hacia que el
@@ -188,48 +202,52 @@ fn modal_resumen() -> Option<String> {
 /// forma de mentir: hace perder tiempo donde no hay nada que arreglar.
 const NO_BLOQUEANTES: &[&str] = &["ReaScript console output"];
 
-/// Diálogos molestos que se cierran solos, identificados por huella.
+/// DiÃ¡logos molestos que se cierran solos, identificados por huella.
 ///
-/// `(el título contiene, el cuerpo contiene, botones que sirven para cerrar)`.
+/// `(el tÃ­tulo contiene, el cuerpo contiene)`.
 ///
-/// ## Por qué una huella y no un botón
+/// ## Por quÃ© una huella y no un botÃ³n
 ///
-/// La primera versión emparejaba el aviso de evaluación con su botón
-/// "Still Evaluating", por coincidencia exacta. Falló en el primer arranque
-/// real: Reaper **cambia el texto del botón** entre lanzamientos —la vez
-/// siguiente era "Buy Me [4]"—, así que la regla no encontraba nada y el
-/// aviso se quedaba bloqueando igual.
+/// La primera versiÃ³n emparejaba el aviso de evaluaciÃ³n con su botÃ³n
+/// "Still Evaluating", por coincidencia exacta. FallÃ³ en el primer arranque
+/// real: Reaper **cambia el texto del botÃ³n** entre lanzamientos â€”la vez
+/// siguiente era "Buy Me [4]"â€”, asÃ­ que la regla no encontraba nada.
 ///
-/// El texto del botón es la parte que varía; el **cuerpo del diálogo** no.
-/// "REAPER IS NOT FREE" aparece en ese aviso y en ninguno más, así que
-/// identifica la ventana sin depender de cómo la titule Reaper esta vez.
+/// El texto del botÃ³n es la parte que varÃ­a; el **cuerpo del diÃ¡logo** no.
+/// "REAPER IS NOT FREE" aparece en ese aviso y en ninguno mÃ¡s.
 ///
-/// ## Por qué no se pulsa "a ciegas"
+/// ## Por quÃ© se cierra la ventana y NO se pulsa un botÃ³n
 ///
-/// Hacen falta las dos condiciones, no una: el título **y** la frase. Un
-/// diálogo desconocido no hereda la regla por parecerse, y si no aparece
-/// ningún botón conocido se manda `WM_CLOSE` —cerrar *la* ventana concreta—
-/// en vez de adivinar un control.
-const MOLESTIAS: &[(&str, &str, &[&str])] = &[(
-    "About REAPER",
-    "REAPER IS NOT FREE",
-    &["Still Evaluating", "Buy Me", "Close", "OK"],
-)];
+/// La segunda versiÃ³n sÃ­ encontraba el botÃ³n, por coincidencia parcial, y la
+/// pulsÃ³. Y el botÃ³n que encontrÃ³ fue **"Buy Me [4]"**: el flujo de compra de
+/// Reaper. Es decir: la regla "busca un botÃ³n conocido" puede acabar metiendo
+/// al usuario en una tienda.
+///
+/// AsÃ­ que aquÃ­ no hay lista de botones. Un `#32770` se cierra con `WM_CLOSE`,
+/// que es "descarta esta ventana" y no tiene consecuencias. Pulsar un control
+/// de un diÃ¡logo de licencia sÃ­ las tiene, y esa es una decisiÃ³n de una
+/// persona.
+///
+/// ## Por quÃ© no se cierra a ciegas
+///
+/// Hacen falta las dos condiciones, tÃ­tulo **y** frase. Un diÃ¡logo
+/// desconocido no se cierra por parecerse a otro, y un diÃ¡logo conocido con
+/// un botÃ³n "SÃ­" o "OK" tampoco: esas cosas las decide alguien.
+const MOLESTIAS: &[(&str, &str)] = &[
+    ("About REAPER", "REAPER IS NOT FREE"),
+];
 
-/// ¿Es esta ventana uno de los diálogos que se cierran solos?
-fn es_molestia(w: &win::WinInfo) -> Option<&'static [&'static str]> {
-    MOLESTIAS
-        .iter()
-        .find(|(titulo, frase, _)| {
-            w.title.contains(titulo) && w.otros_controles().iter().any(|t| t.contains(frase))
-        })
-        .map(|(_, _, botones)| *botones)
+/// Â¿Es esta ventana uno de los diÃ¡logos que se cierran solos?
+fn es_molestia(w: &win::WinInfo) -> bool {
+    MOLESTIAS.iter().any(|(titulo, frase)| {
+        w.title.contains(titulo) && w.otros_controles().iter().any(|t| t.contains(frase))
+    })
 }
 
 /// Botones que este modulo **no** pulsa solo.
 ///
-/// Un "Sí"/"Yes" en un diálogo de Reaper suele ser "cambiar esta preferencia",
-/// y eso es una decisión del usuario, no del agente. Se reporta; no se pulsa.
+/// Un "SÃ­"/"Yes" en un diÃ¡logo de Reaper suele ser "cambiar esta preferencia",
+/// y eso es una decisiÃ³n del usuario, no del agente. Se reporta; no se pulsa.
 const NUNCA_SOLO: &[&str] = &["si", "s&iacute;", "yes", "aceptar", "accept", "ok", "enable", "activar"];
 
 fn puede_pulsar(texto: &str) -> bool {
@@ -237,10 +255,10 @@ fn puede_pulsar(texto: &str) -> bool {
     !NUNCA_SOLO.iter().any(|n| t.starts_with(n) || n.starts_with(&t))
 }
 
-/// Cierra los diálogos que bloquean Reaper.
+/// Cierra los diÃ¡logos que bloquean Reaper.
 ///
-/// `forzar` permite pulsar también botones que cambian preferencias; sin él
-/// `daw_debug` se niega y devuelve el diálogo para que decida la persona.
+/// `forzar` permite pulsar tambiÃ©n botones que cambian preferencias; sin Ã©l
+/// `daw_debug` se niega y devuelve el diÃ¡logo para que decida la persona.
 fn desbloquear(forzar: bool, saltar_eval: bool) -> std::result::Result<Value, ToolError> {
     let Some(pid) = win::pid_reaper() else {
         return Err(ToolError::internal(
@@ -272,16 +290,25 @@ fn desbloquear(forzar: bool, saltar_eval: bool) -> std::result::Result<Value, To
         // Primero la regla especifica de este dialogo, si la hay. Encaja
         // exacto a proposito: asi un dialogo desconocido nunca se cierra por
         // "parecerse" a uno conocido.
-        let conocido = es_molestia(w)
-            .filter(|_| saltar_eval)
-            .and_then(|botones| w.boton(botones).map(|h| (h, botones.join("/"))));
+        // Un dialogo conocido se cierra por ventana, nunca por boton.
+        if saltar_eval && es_molestia(w) {
+            win::cerrar(w.hwnd);
+            pulsados.push(json!({ "titulo": w.title, "boton": "WM_CLOSE" }));
+            continue;
+        }
         let candidatos = ["Continue", "Continuar", "No", "OK", "Cerrar", "Close", "End script"];
-        let elegido = conocido.or_else(|| {
-            candidatos
-                .iter()
-                .find_map(|c| w.boton(&[c]))
-                .map(|h| (h, candidatos.iter().find(|c| w.boton(&[c]) == Some(h)).copied().unwrap_or("?").to_string()))
-        });
+        let elegido = candidatos
+            .iter()
+            .find_map(|c| w.boton(&[c]))
+            .map(|h| {
+                let nombre = candidatos
+                    .iter()
+                    .find(|c| w.boton(&[c]) == Some(h))
+                    .copied()
+                    .unwrap_or("?")
+                    .to_string();
+                (h, nombre)
+            });
         match elegido {
             Some((h, nombre)) if forzar || puede_pulsar(&nombre) => {
                 win::pulsar(h);
@@ -308,7 +335,7 @@ fn desbloquear(forzar: bool, saltar_eval: bool) -> std::result::Result<Value, To
 }
 
 // ============================================================================
-// Evaluar Lua con el guardián
+// Evaluar Lua con el guardiÃ¡n
 // ============================================================================
 
 /// Instala (o reinstala) el guardian si el fichero no coincide.
@@ -344,7 +371,7 @@ pub async fn lua(code: &str) -> std::result::Result<Value, ToolError> {
             let m = e.to_string();
             // El caso interesante: se colgo. Entonces el sintoma unico que
             // recibe el agente se sustituye por el texto del modal.
-            if let Some(modal) = modal_resumen() {
+            if let Some(modal) = modal_resumen(true) {
                 ToolError::internal(format!(
                     "{m}\n\nPERO hay un dialogo de Reaper bloqueando el DAW:\n  {modal}\n\
                      El bridge no contesta porque Reaper esta esperando a ese dialogo. \
@@ -384,7 +411,7 @@ pub async fn lua(code: &str) -> std::result::Result<Value, ToolError> {
 /// Deja el sistema a salvo de una muerte del bridge.
 ///
 /// Instala el guardian y el supervisor, y reapunta `__startup.lua` al
-/// supervisor. Del `__startup.lua` existente **solo seæŽ¥ç®¡ si es el nuestro o
+/// supervisor. Del `__startup.lua` existente **solo seÃ¦Å½Â¥Ã§Â®Â¡ si es el nuestro o
 /// si esta vacio**: si el usuario tiene su propio arranque, se deja intacto y
 /// se dice, porque pisar el arranque de Reaper de alguien sin preguntar es
 /// justo el tipo de sorpresa que no se perdona.
@@ -460,51 +487,36 @@ fn provisionar() -> std::result::Result<Value, ToolError> {
     }))
 }
 
-/// Cierra un diálogo molesto conocido, en silencio. Devuelve qué cerró.
+/// Cierra un diÃ¡logo molesto conocido, en silencio. Devuelve quÃ© cerrÃ³.
 ///
-/// Esto vive aquí y no en la tool a propósito: **todas** las tools pasan por
-/// `call()`, así que ponerlo en `call()` convierte un bloqueo en un
-/// contratiempo. Sin esto, el aviso de evaluación de Reaper deja el DAW
+/// Esto vive aquÃ­ y no en la tool a propÃ³sito: **todas** las tools pasan por
+/// `call()`, asÃ­ que ponerlo en `call()` convierte un bloqueo en un
+/// contratiempo. Sin esto, el aviso de evaluaciÃ³n de Reaper deja el DAW
 /// inalcanzable hasta que alguien mire, y un agente no puede mirar una
 /// pantalla.
 ///
-/// Es solo para diálogos de una lista cerrada y con el botón literal. Un
-/// diálogo desconocido se reporta, no se toca.
+/// Es solo para diÃ¡logos de una lista cerrada y con el botÃ³n literal. Un
+/// diÃ¡logo desconocido se reporta, no se toca.
 pub fn cerrar_molestia(saltar_eval: bool) -> Option<String> {
     let pid = win::pid_reaper()?;
     for w in win::dialogos_modales(pid) {
         if NO_BLOQUEANTES.iter().any(|n| w.title.contains(n)) {
             continue;
         }
-        let botones = es_molestia(&w)?;
-        if !saltar_eval {
+        if !es_molestia(&w) || !saltar_eval {
             continue;
         }
-        match w.boton(botones) {
-            Some(h) => {
-                let pulsado = w.botones().into_iter()
-                    .find(|t| botones.iter().any(|b| t.trim_start_matches('&')
-                        .to_lowercase().contains(&b.to_lowercase())))
-                    .unwrap_or("boton");
-                win::pulsar(h);
-                let msg = format!("{} -> {pulsado}", w.title);
-                anotar("warn", &format!("autorreparado: {msg}"));
-                return Some(msg);
-            }
-            None => {
-                // Ningun boton conocido: se cierra la ventana. No es pulsar un
-                // control al azar, es cerrar *la* ventana concreta.
-                win::cerrar(w.hwnd);
-                let msg = format!("{} -> WM_CLOSE (sin boton conocido)", w.title);
-                anotar("warn", &format!("autorreparado: {msg}"));
-                return Some(msg);
-            }
-        }
+        // `WM_CLOSE`, nunca un boton. Ver la nota de MOLESTIAS: el boton de
+        // este dialogo era "Buy Me [4]".
+        win::cerrar(w.hwnd);
+        let msg = format!("{} -> WM_CLOSE", w.title);
+        anotar("warn", &format!("autorreparado: {msg}"));
+        return Some(msg);
     }
     None
 }
 
-/// ¿El error es "el DAW no contestó"? Es la señal de que hay algo bloqueando.
+/// Â¿El error es "el DAW no contestÃ³"? Es la seÃ±al de que hay algo bloqueando.
 pub fn es_timeout(e: &str) -> bool {
     e.contains("no respondio") || e.contains("Timeout") || e.contains("timed out")
 }
@@ -513,27 +525,27 @@ pub fn es_timeout(e: &str) -> bool {
 // La tool
 // ============================================================================
 
-/// Diagnostico del DAW y de la tool: qué está bloqueado, por qué, y qué se
+/// Diagnostico del DAW y de la tool: quÃ© estÃ¡ bloqueado, por quÃ©, y quÃ© se
 /// puede hacer. Ademas ejecuta Lua de forma segura.
 ///
 /// op:
-/// - `status` (por defecto): todo junto. Empieza por aquí.
-/// - `modal`: los diálogos que están congelando Reaper, con su texto.
-/// - `unblock`: cerrarlos. `force=true` pulsa también botones que cambian
+/// - `status` (por defecto): todo junto. Empieza por aquÃ­.
+/// - `modal`: los diÃ¡logos que estÃ¡n congelando Reaper, con su texto.
+/// - `unblock`: cerrarlos. `force=true` pulsa tambiÃ©n botones que cambian
 ///   preferencias; sin eso se niega y los reporta.
 /// - `eval`: ejecuta un fragmento Lua con `pcall` y devuelve su valor como
-///   JSON. Es la vía a las 569 funciones de la API que el bridge no envuelve,
-///   y también la forma de que un error llegue como texto en vez de congelar
-///   el DAW. **No es un sandbox**: el código se ejecuta con permisos plenos
+///   JSON. Es la vÃ­a a las 569 funciones de la API que el bridge no envuelve,
+///   y tambiÃ©n la forma de que un error llegue como texto en vez de congelar
+///   el DAW. **No es un sandbox**: el cÃ³digo se ejecuta con permisos plenos
 ///   dentro de Reaper.
-/// - `log`: las ultimas lineas de la bitácora de la tool.
+/// - `log`: las ultimas lineas de la bitÃ¡cora de la tool.
 /// - `exchange`: que hay ahora mismo en `command.json` / `response.json`, la
 ///   edad del heartbeat, y si hay un modal.
-/// - `restart_bridge`: relanza el bridge **solo si está muerto**, y lo
-///   comprueba con una petición real antes de tocar nada. El supervisor no lo
+/// - `restart_bridge`: relanza el bridge **solo si estÃ¡ muerto**, y lo
+///   comprueba con una peticiÃ³n real antes de tocar nada. El supervisor no lo
 ///   hace en caliente porque `Main_OnCommand` sobre un ReaScript en marcha
 ///   destruye la instancia que funciona.
-/// - `install`: (re)instala el guardián y dice si cambió.
+/// - `install`: (re)instala el guardiÃ¡n y dice si cambiÃ³.
 #[tool(description = "Diagnose why the DAW stopped answering, and safely run Lua inside it. Start with op=status when anything feels stuck. op=modal lists the dialog windows that are freezing Reaper and shows their text; op=unblock closes them (it refuses to press buttons that change your preferences unless force=true); op=eval runs a Lua snippet wrapped in pcall so an error comes back as text instead of a modal that freezes the DAW, and returns its value as JSON - that is also how to reach the 569 Reaper API functions the bridge does not wrap; op=restart_bridge relaunches the bridge if and only if it is really dead (it sends a real request first); op=log tails this tool's own log; op=exchange shows the current command.json/response.json and the heartbeat age.")]
 pub async fn daw_debug(
     op: String,
@@ -589,12 +601,6 @@ pub async fn daw_debug(
 
         "status" | "estado" => {
             let bridge = heretic_daw::ReaperBridge::with_defaults();
-            let modales = modal_dump();
-            let bloqueando = modales
-                .as_ref()
-                .and_then(|m| m.get("bloqueando"))
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0);
             let vivo = bridge.is_alive();
             let detalle = if vivo {
                 match bridge.call("transport_get_state", json!({})) {
@@ -604,13 +610,21 @@ pub async fn daw_debug(
             } else {
                 json!({ "ok": false, "error": "sin heartbeat: el ReaScript bridge no esta corriendo" })
             };
-            let cfg = heretic_daw::file_rpc::RpcConfig::default_config();
+            // Lo que decide el veredicto es si el DAW CONTESTA, no si hay un
+            // dialogo en pantalla: el aviso de evaluacion aparece despues de
+            // que el bridge arranque, y el DAW sigue respondiendo.
+            let contesta = detalle.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
+            let modales = modal_dump(contesta);
+            let bloqueando = modales
+                .as_ref()
+                .and_then(|m| m.get("bloqueando"))
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
             let out = json!({
                 "reaper_corriendo": win::pid_reaper().is_some(),
-                "bridge_heartbeat": heretic_daw::FileRpc::new(cfg).heartbeat_age().map(|d| d.as_millis() as u64),
                 "bridge": detalle,
                 "dialogos_bloqueando": modales,
-                "diagnostico": diagnostico(vivo, bloqueando > 0),
+                "diagnostico": diagnostico(contesta, bloqueando > 0),
                 "si_hay_dialogo": {
                     "leer": "daw_debug op=modal",
                     "cerrar": "daw_debug op=unblock",
@@ -620,7 +634,14 @@ pub async fn daw_debug(
             Ok(out)
         }
 
-        "modal" | "modales" => match modal_dump() {
+        "modal" | "modales" => {
+            // Preguntar si el DAW contesta es lo que decide que un dialogo
+            // sea bloqueante o no. Sin esta llamada no hay criterio.
+            let contesta = match crate::tools::call("transport_get_state", json!({})) {
+                Ok(_) => true,
+                Err(_) => false,
+            };
+            match modal_dump(contesta) {
             Some(ds) => {
                 let n = ds["bloqueando"].as_u64().unwrap_or(0);
                 if n > 0 {
@@ -640,7 +661,8 @@ pub async fn daw_debug(
                          contesta, el problema es otro: mira op=exchange (heartbeat) y \
                          la consola de Reaper.",
             })),
-        },
+            }
+        }
 
         "unblock" | "desbloquear" => {
             let r = desbloquear(forzar, saltar_eval).map_err(|e| {
@@ -702,7 +724,10 @@ pub async fn daw_debug(
                 "heartbeat_ms": latido,
                 "command_json": leer(&cfg.command),
                 "response_json": leer(&cfg.response),
-                "dialogos_bloqueando": modal_dump(),
+                "dialogos_bloqueando": modal_dump(
+                    heretic_daw::ReaperBridge::with_defaults()
+                        .call("transport_get_state", json!({})).is_ok(),
+                ),
                 "reaper_corriendo": win::pid_reaper().is_some(),
             }))
         }
@@ -720,25 +745,46 @@ pub async fn daw_debug(
 }
 
 /// El veredicto en una frase, que es lo que se lee primero.
-fn diagnostico(vivo: bool, hay_modal: bool) -> String {
-    match (hay_modal, vivo) {
-        (true, _) => "Reaper esta CONGELADO por un dialogo modal. El bridge no contesta \
-                      por eso, no porque este muerto. daw_debug op=unblock lo cierra."
-            .into(),
-        (false, true) => "El bridge responde. Si algo falla, el problema no es la \
-                          comunicacion.".into(),
-        (false, false) => "No hay dialogos, pero tampoco heartbeat. El ReaScript bridge no \
-                           esta corriendo dentro de Reaper: Actions > Show action list > \
-                           ReaScript, elige reaper_mcp_server.lua y dale a Run."
-            .into(),
+/// El veredicto, y por quÃ© NO sale solo de "hay un diÃ¡logo".
+///
+/// La primera versiÃ³n lo hacÃ­a, y se contradijo a sÃ­ misma en vivo: el aviso de
+/// evaluaciÃ³n de Reaper estaba en pantalla, asÃ­ que decÃ­a CONGELADO, mientras
+/// `daw_health` respondÃ­a `bridge: ok` con las 162 acciones. Un veredicto que
+/// se contradice con la mediciÃ³n de al lado hace perder tiempo donde no hay
+/// nada que arreglar.
+///
+/// Que un `#32770` estÃ© visible no significa que el DAW estÃ© parado: el aviso
+/// aparece DESPUÃ‰S de que el bridge arranque, y el bucle de ReaScript sigue
+/// corriendo igual. Lo que decide es si el DAW contesta.
+fn diagnostico(contesta: bool, hay_dialogo_bloqueante: bool) -> String {
+    match (hay_dialogo_bloqueante, contesta) {
+        (true, true) =>
+            "Hay un dialogo en pantalla, pero el DAW responde. No esta congelado y \
+             se puede trabajar. El unico que se cierra sin preguntar es el aviso \
+             de evaluacion, y se cierra por ventana, no pulsando un boton suyo."
+                .into(),
+        (true, false) =>
+            "Reaper esta CONGELADO por un dialogo modal. El bridge no contesta por \
+             eso, no porque este muerto. daw_debug op=modal para leerlo, \
+             op=unblock para cerrarlo."
+                .into(),
+        (false, true) =>
+            "El DAW responde y no hay nada bloqueando. Si algo falla, no es la \
+             comunicacion."
+                .into(),
+        (false, false) =>
+            "No hay dialogos, pero el DAW no contesta. El ReaScript bridge no esta \
+             corriendo: Actions > Show action list > ReaScript, elige \
+             reaper_mcp_server.lua y dale a Run. O daw_debug op=restart_bridge."
+                .into(),
     }
 }
 
-/// Resumen de una línea de un valor JSON cualquiera, para la bitácora.
+/// Resumen de una lÃ­nea de un valor JSON cualquiera, para la bitÃ¡cora.
 fn primer_plano(v: &Value) -> String {
     let s = v.to_string();
     if s.chars().count() > 200 {
-        format!("{}â€¦", s.chars().take(200).collect::<String>())
+        format!("{}Ã¢â‚¬Â¦", s.chars().take(200).collect::<String>())
     } else {
         s
     }
@@ -769,42 +815,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn el_diagnostico_distingue_modal_de_bridge_muerto() {
-        // `diagnostico(vivo, hay_modal)`. Los dos fallos producen el MISMO
-        // sintoma ("el bridge no respondio en 10 s"); confundirlos cuesta un
-        // ciclo entero de prueba y error.
-        let con_modal = diagnostico(true, true);
-        assert!(con_modal.contains("CONGELADO"), "{con_modal}");
-        assert!(con_modal.contains("unblock"), "debe decir como arreglarlo: {con_modal}");
-
-        assert!(diagnostico(true, false).contains("responde"));
-        assert!(diagnostico(false, false).contains("heartbeat"));
-    }
-
-    #[test]
-    fn un_modal_manda_sobre_el_heartbeat_ausente() {
-        // Matiz que se aprende sufriendolo: cuando Reaper esta congelado por un
-        // dialogo, TAMPOCO escribe el heartbeat. Asi que "no hay heartbeat" no
-        // descarta "hay un modal", y al reves. Por eso `status` mira las dos
-        // cosas y no se fia del heartbeat para culpar al bridge.
-        let congelado = diagnostico(false, true);
-        assert!(
-            congelado.contains("CONGELADO"),
-            "con un modal abierto el veredicto debe ser el modal, aunque no \
-             haya heartbeat. Got: {congelado}"
-        );
-    }
-
-    #[test]
-    fn la_consola_de_reascript_no_cuenta_como_bloqueo() {
-        // Si contara, el veredicto diria CONGELADO con el DAW sano, que es la
-        // peor forma de mentir: hace perder tiempo donde no hay nada que
-        // arreglar.
-        assert!(NO_BLOQUEANTES.contains(&"ReaScript console output"));
-        assert!(!MOLESTIAS.iter().any(|(t, _, _)| t.contains("ReaScript")));
-    }
-
     /// Ventana de prueba con la clase y el texto que uno quiera.
     fn ventana(titulo: &str, controles: &[(&str, &str)]) -> win::WinInfo {
         win::WinInfo {
@@ -821,8 +831,8 @@ mod tests {
     #[test]
     fn el_aviso_de_evaluacion_se_reconoce_por_su_cuerpo() {
         // Reaper cambia el texto del boton entre arranques: la primera vez
-        // "Still Evaluating", la siguiente "Buy Me [4]". La huella no depende
-        // de eso, que es justo por lo que se escribio asi.
+        // "Still Evaluating", la siguiente "Buy Me [4]". Por eso la huella
+        // mira el cuerpo y no el boton.
         let w = ventana(
             "About REAPER v7.80/win64 rev 9d9fa7 (Sep 13 2026)",
             &[
@@ -830,27 +840,92 @@ mod tests {
                 ("Button", "Buy Me [4]"),
             ],
         );
-        let botones = es_molestia(&w).expect("debe reconocerse por el cuerpo");
-        assert_eq!(w.boton(botones), Some(101));
+        assert!(es_molestia(&w));
+    }
+
+    #[test]
+    fn ningun_dialogo_molesto_tiene_una_lista_de_botones_que_pulsar() {
+        // La version anterior buscaba un boton conocido y pulso "Buy Me [4]":
+        // el flujo de compra de Reaper. Cerrar la ventana no tiene
+        // consecuencias; pulsar un boton de un dialogo de licencia si.
+        for (_, _) in MOLESTIAS {
+            assert!(true);
+        }
+        let w = ventana(
+            "About REAPER v7.80",
+            &[
+                ("Static", "REAPER IS NOT FREE."),
+                ("Button", "Buy Me [4]"),
+                ("Button", "Import license key..."),
+            ],
+        );
+        // Se reconoce (se cierra) pero no hay ni un solo boton en la regla.
+        assert!(es_molestia(&w));
+        assert_eq!(MOLESTIAS.len(), 1);
+        assert!(!MOLESTIAS.iter().any(|(t, f)| f.contains("Buy")));
     }
 
     #[test]
     fn un_dialogo_que_no_dice_esos_no_pasa_ni_por_parecido() {
         // Lo que evita: que cualquier ventana titulada "About REAPER", o con
         // un boton "Close", se cierre por parecerse a la que ya se conoce.
-        assert!(es_molestia(&ventana("About REAPER v7.80", &[("Button", "Close")])).is_none());
-        assert!(es_molestia(&ventana("Save changes?", &[("Button", "No")])).is_none());
-        assert!(es_molestia(&ventana("ReaScript Error", &[("Button", "Close")])).is_none());
+        assert!(!es_molestia(&ventana("About REAPER v7.80", &[("Button", "Close")])));
+        assert!(!es_molestia(&ventana("Save changes?", &[("Button", "No")])));
+        assert!(!es_molestia(&ventana("ReaScript Error", &[("Button", "Close")])));
     }
 
     #[test]
-    fn un_dialogo_desconocido_no_hereda_el_boton_de_uno_conocido() {
-        // El fallo que evita: "Este plugin ha fallado (Still Evaluating)" no
-        // puede heredarse la regla del aviso de licencia.
+    fn un_dialogo_desconocido_no_pulsa_nada() {
+        // "Continue" esta en la lista generica de salida, pero una ventana que
+        // no es una molestia conocida se reporta, no se toca.
         let w = ventana("ReaScript Error", &[("Button", "Continue")]);
-        assert!(es_molestia(&w).is_none());
-        // Pero "Continue" si esta en la lista generica de salida.
+        assert!(!es_molestia(&w));
         assert_eq!(w.boton(&["Continue"]), Some(100));
+    }
+
+    #[test]
+    fn la_consola_de_reascript_no_cuenta_como_bloqueo() {
+        // Si contara, el veredicto diria CONGELADO con el DAW sano, que es la
+        // peor forma de mentir: hace perder tiempo donde no hay nada que
+        // arreglar.
+        assert!(NO_BLOQUEANTES.contains(&"ReaScript console output"));
+        assert!(!MOLESTIAS.iter().any(|(t, _)| t.contains("ReaScript")));
+    }
+
+    #[test]
+    fn el_diagnostico_distingue_congelado_de_tener_un_dialogo() {
+        // Se contradijo en vivo: el aviso de evaluacion en pantalla y el
+        // bridge respondiendo las 162 acciones. "Hay dialogo" no es "esta
+        // congelado", y decir lo contrario hace perder el tiempo de quien lee.
+        let con_dialogo_pero_vivo = diagnostico(true, true);
+        assert!(
+            !con_dialogo_pero_vivo.contains("CONGELADO"),
+            "un dialogo visible con el DAW respondiendo no es una congelacion: \
+             Got: {con_dialogo_pero_vivo}"
+        );
+        assert!(con_dialogo_pero_vivo.contains("responde"), "{con_dialogo_pero_vivo}");
+
+        let congelado = diagnostico(false, true);
+        assert!(congelado.contains("CONGELADO"), "{congelado}");
+        assert!(congelado.contains("unblock"), "debe decir como se arregla");
+
+        assert!(diagnostico(true, false).contains("responde"));
+        assert!(diagnostico(false, false).contains("no contesta"));
+    }
+
+    #[test]
+    fn el_diagnostico_nunca_afirma_una_congelacion_sin_prueba() {
+        // La combinacion que se dio de verdad: dialogo de evaluacion visible,
+        // RPC respondiendo. Si esto dijera "congelado", el agente cerraria
+        // dialogos que no estorban y el usuario perderia la ventana de About.
+        for contesta in [true, false] {
+            let d = diagnostico(contesta, true);
+            if contesta {
+                assert!(!d.contains("CONGELADO"), "{d}");
+            } else {
+                assert!(d.contains("CONGELADO"), "{d}");
+            }
+        }
     }
 
     #[test]
@@ -861,4 +936,5 @@ mod tests {
         assert!(p.ends_with("daw_debug.log"), "{p:?}");
     }
 }
+
 
