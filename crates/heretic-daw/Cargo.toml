@@ -1,0 +1,17 @@
+﻿[package]
+name        = "heretic-daw"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Puente file-RPC a un DAW (REAPER) para el daemon blindado"
+
+[dependencies]
+serde       = { workspace = true }
+serde_json  = { workspace = true }
+thiserror   = { workspace = true }
+tracing     = { workspace = true }
+tokio       = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3.13"

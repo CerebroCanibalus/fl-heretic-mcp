@@ -56,3 +56,5 @@ legacy/htmlcov/
 legacy/*.egg-info/
 legacy/build/
 legacy/dist/
+# MCPs de Reaper clonados para estudio: material de referencia, no codigo nuestro
+vendor-study/

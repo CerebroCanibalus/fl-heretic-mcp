@@ -1,678 +1,206 @@
-# AGENTS.md — FL Heretic MCP
+# DAW Heretic MCP
 
 > **Memoria viva del proyecto.** Cualquier sesión futura debe leer esto primero.
-> Actualizar tras cada iteración completada (formato changelog al final).
 
 ---
 
-## 0. Identidad del proyecto
+## 0. Estado actual: scaffolding para REAPER
 
-- **Nombre:** FL Heretic MCP
-- **Propósito:** MCP server + **daemon blindado** que controla FL Studio desde agentes IA, rompiendo el walled garden de FL con un modelo de seguridad fuerte y concurrencia real.
-- **Tagline:** *"Daemons blindados para un DAW amurallado."*
-- **Rename:** este repo se llamaba `FLStudioMCP` (Python, FastMCP). El propósito nuevo (Rust + FlojoMCP + daemon blindado + Named Pipes) implica rename físico del directorio y de los artefactos. Ver §10.
-- **Licencia:** GPL-3.0-or-later
-- **Stack objetivo:** Cargo workspace, Rust 2024, `flojo-mcp` + `flojo-macros` (path deps), `tokio`, `rusqlite`, `hmac`, `clap`.
-- **Path raíz:** `D:\Mis Juegos\ClaudeMCPs\FLHereticMCP\`
+**Punto de partida:** hoy el repo solo tiene el andamiaje. El trabajo de FL
+Studio está en el historial (hasta `0930996`) y fue commiteado antes de
+borrarlo, así que se puede recuperar con `git show`.
+
+### Por qué se abandonó FL Studio
+
+No es que la implementación fuera mala: **es que la API no existe.** Medido
+sobre FL Studio 2025 real (MIDI scripting v38), contra sus 11 módulos:
+
+| Necesidad | ¿FL la tiene? |
+|---|---|
+| Guardar proyecto con ruta | ✅ `midi.FPT_Save` (verificado, 90 ms) |
+| Abrir proyecto | ❌ sin `FPT_Open` ni nada en `general` |
+| Crear proyecto nuevo | ❌ sin `FPT_New` ni `general.newProject` |
+| Cerrar proyecto | ❌ sin `FPT_Close` |
+| Cambiar de proyecto | ⚠️ copiar el `.flp` + `CreateProcess` |
+
+De las **79** constantes `midi.FPT_*`, solo hay `FPT_Save` y `FPT_SaveNew`.
+`FPT_SaveNew` abre un diálogo cuyos campos son `TQuickEdit` (controles Delphi
+internos) que aceptan texto pero **cierran sin guardar** al confirmar.
+
+El menú File es **owner-draw**: `GetMenu` devuelve un handle pero
+`GetMenuItemCount` da 0, así que sus items no se pueden leer por Win32.
+
+Y el Python del controller script corre en un sandbox sin `file I/O`, sin
+sockets, sin `subprocess` (todo medido). Por eso el transporte acabó siendo
+ficheros + MIDI para despertarlo, con un techo de 1.5KB por mensaje.
+
+**Esto no es un defecto de FL.** La API de Cubase tiene las mismas
+limitaciones: sandboxed, sin file I/O, sin red, sin crear pistas, sin insertar
+plugins. Los DAW modernos exponen scripting para *control de hardware*, no
+para *producción programática*.
+
+### Por qué REAPER
+
+| | REAPER | FL Studio |
+|---|---|---|
+| Funciones de API | **900+** | crippled |
+| Control externo | **`python-reapy` por TCP** o file-RPC | MIDI, 1.5KB, sandbox |
+| File I/O desde el DAW | ✅ libre | ❌ bloqueado |
+| Crear pistas | ✅ | ❌ |
+| Insertar plugins | ✅ | ❌ |
+| MCP existentes | varios, 55-600+ tools | ninguno |
+| Licencia | 60 días gratis → **$60** | $99 |
+
+Reaper 7.80 está instalado en `C:\Program Files\REAPER (x64)\`.
+
+### Los plugins de FL Studio
+
+Los **nativos** (FLEX, Sytrus, Harmor) no son VST3: son FL-only. Pero existe
+`FL Studio VSTi (Multi).dll` en:
+```
+D:\Program Files\Image-Line\FL Studio 2025\System\Plugin\VSTi\x64\
+```
+que carga **FL Studio entero como VST2** dentro de REAPER → FLEX y todo el
+bundle siguen disponibles. Reaper soporta VST2.
+
+Trampas conocidas (de foros): hay que crear una pista de **instrumento** (no
+de audio), FL debe estar en modo "song", y el output a "FL 1".
 
 ---
 
-## 1. Visión
-
-FL Studio expone un sandbox Python muy limitado en controller scripts: ni file I/O, ni sockets, ni subprocess. El único canal bidireccional always-on es MIDI SysEx con un techo físico de ~1.5KB por mensaje (loopMIDI dropea silenciosamente más grande). El FLStudioMCP original resolvió esto con ingenio (MIDI SysEx + daemon TCP fallback + paginación por presupuesto), pero carga con 4 problemas estructurales:
-
-1. **Detección de plugins = primitiva** → solo plugins ya cargados en slots 0-9 del mixer. Sin índice de librería. Sin parse de `.fst`. Sin fabricante/formato.
-2. **Detección de proyectos = primitiva** → `get_project_state` devuelve 7 campos. Sin parse del `.flp`. Sin samples referenciados.
-3. **Transporte MIDI = techo 1.5KB** → paginación obligatoria de TODO, round-trip latency, ports loopback frágiles.
-4. **Runtime Python pesado** → 50-76MB RAM, GIL, deploy con venv + native deps.
-
-**FL Heretic MCP** ataca los 4 con un diseño en 3 capas:
+## 1. Qué hay en el repo ahora
 
 ```
-[MCP server stdio]  ←FlojoMCP→  [Daemon blindado Named Pipe]  ←MIDI+parse→  [FL Studio]
-     Rust 7MB              Rust mismo binary           FL Python sandbox + .flp
+DAWHereticMCP/
+├── Cargo.toml                  # workspace: heretic-core, heretic-mcp, heretic-daw
+├── AGENTS.md                   # este archivo
+├── crates/
+│   ├── heretic-core/           # tipOS compartidos, error, auth HMAC, audit SQLite, protocol
+│   │                           # ESTO SE CONSERVA: la capa de blindaje
+│   ├── heretic-daw/            # puente file-RPC a REAPER  (nuevo)
+│   │   ├── src/lib.rs
+│   │   ├── src/file_rpc.rs     # transporte: command.json -> response.json
+│   │   └── src/reaper.rs       # cliente tipado + catalogo de acciones
+│   └── heretic-mcp/            # server MCP stdio de FlojoMCP (andamiaje)
+└── vendor-study/               # MCPs de Reaper clonados para estudiar
+    ├── xDarkzx/                # 180 tools, CI, bridge Lua, commit hace 3 dias
+    ├── total-reaper-mcp/       # 600+ tools, perfiles, bridge Lua
+    └── T-Rzeznik/              # 55 tools, bridge TCP, diseño limpio
 ```
 
-El daemon es el único proceso autorizado a tocar FL. Autentica cada request del agente, rate-limitea, audita, supervisa FL con watchdog, cachea el proyecto en SQLite, y maneja reconexión tras crashes sin que el MCP server se entere.
+**Se conserva `heretic-core`:** es la capa de blindaje (HMAC Bearer, audit log
+SQLite append-only, protocolo JSON-RPC). Ninguno de los MCPs de Reaper tiene
+nada de eso: son bridges locales sin autenticación.
 
 ---
 
-## 2. Auditoría del FLStudioMCP original (referencia histórica)
+## 2. Diseño del transporte (heretic-daw)
 
-Esto ya está preservado en `AUDIT.md`. Resumen ejecutivo:
+El bridge Lua dentro de Reaper (`xDarkzx/Reaper-MCP`) usa **file-based IPC**:
 
-### Lo que está BIEN (no se tira, se re-implementa)
-- SysEx wire format (F0/F7 framing, base64, magic `MCP`, request-id, heartbeat 500ms)
-- Safety layer (`safe_write`, `safe_write_group`, changelog JSONL, dry-run)
-- Mix Doctor v3 (30KB, snapshot/diagnose/plan separados, full-song peak watch)
-- Plugin→intent calibration pattern (sweep+readback)
-- Limits honestos (no carga plugins nuevos, no crea patterns, no coloca clips)
+```text
+MCP (Rust)  --escribe-->  command.json    [dentro de Reaper]
+MCP (Rust)  <--lee--     response.json   [dentro de Reaper]
+```
 
-### Lo que está PODRIDO (los 4 problemas)
-1. **Plugin detection = basura** → ver §1 arriba
-2. **Project detection = primitiva**
-3. **MIDI SysEx = techo 1.5KB**
-4. **Python runtime = pesado**
+Es el mismo patrón que el file-RPC de FL, pero con **una diferencia que lo
+cambia todo**: el bridge de Reaper corre su propio bucle `defer()` a ~30 Hz.
 
-### Inventario del código legacy a preservar como referencia
-- `fl_controller/FLStudioMCP/device_FLStudioMCP.py` (37KB) → portar lógica de handlers a Rust
-- `docs/SERUM_PROBE_FINDING.md`, `docs/VST_PROBE_FINDING.md`, `docs/ARRANGEMENT_FINDING.md` → findings críticos para el port
-- `docs/FIX_REPORT.md` → bugs conocidos del controller script (OnSysEx, set_tempo flags)
-- `docs/MIXING_ROUTING_REPORT.md`, `docs/COMPRESSION_CALIBRATION_REPORT.md`, `docs/PHASE1A_REPORT.md`, `docs/PHASE1B_REPORT.md` → contexto de las decisiones de diseño
+**En FL había que mandar MIDI para despertar al DAW.** Eso obligaba a mantener
+puertos MIDI abiertos de forma persistente,cía a tener un techo de 1.5KB, y
+producía toda una clase de fallos "FL no responde" que costaron horas.
+
+En Reaper no hay wake. Eso elimina de raíz la necesidad del MIDI entero.
+
+Detalles que hay que respetar:
+- **Atomicidad**: escribir en `.tmp` y renombrar, con 20 reintentos. En
+  Windows el rename da `PermissionError` si el bridge tiene el destino abierto.
+- **Ids monotónicos**, no timestamps: el bridge compara contra el último id
+  visto, así que un id que no avance se pierde en silencio.
+- **camelCase, no snake_case**. El bridge nombra los params `trackIndex`,
+  `fxIndex`, `paramIndex`. Si el cliente manda snake_case, Reaper **no da
+  error**: se queda con el valor por defecto y parece que funcionó. Es el peor
+  modo de fallo posible, y hay un test que lo fija.
+- **La carpeta de IPC se crea desde el cliente**, no se asume que el bridge ya
+  la hizo. Si no, el error dice "io" en vez de "el bridge no está".
 
 ---
 
-## 3. Decisiones arquitectónicas (con razón)
+## 3. Decisiones
 
 | Decisión | Por qué |
 |---|---|
-| **Cargo workspace, mismo repo, mismo binary** | Un solo binario `fl-heretic.exe` con subcommands. Path deps a `flojo-mcp`/`flojo-macros`. Cero overhead, cero duplicación de tipos. |
-| **Daemon blindado en Rust** | El agente MCP NO es de confianza: validamos todo. Auth HMAC + rate limit + audit log + circuit breaker + ACL + watchdog. |
-| **Named Pipes en Windows** | Single-client perfecto para este caso, más rápido que TCP loopback, ACL de Windows nativa, no expone a la red. `\\.\pipe\fl-heretic-<pid>` |
-| **JSON-RPC 2.0 sobre Named Pipe** | Framing NDJSON (un JSON por línea). Handshake + auth + comandos + heartbeats. |
-| **Auth HMAC-SHA256 Bearer** | Token generado al `init`, guardado en `%LOCALAPPDATA%\fl-heretic\token` con ACL usuario. Cada request firma el payload. |
-| **Rate limit por tool (token bucket)** | `governor` crate (ya en FlojoMCP con feature `rate-limit`). Configurable por tool. Default razonable. |
-| **Audit log SQLite append-only** | WAL mode, tabla `events`, triggers que bloquean UPDATE/DELETE. Retention 30 días rotativo. |
-| **Capability ACL** | Lista de tools permitidas por scope. Default "todo permitido", modo "safe" / "demo" / "readonly". |
-| **Circuit breaker** | 3 heartbeats perdidos → open 5s → half-open 1 prueba → close. Backoff exponencial hasta 60s. |
-| **Watchdog tokio task** | Supervisa FL alive, .pyscript armed, disk space, port conflicts. Auto-recovery best-effort. |
-| **FlojoMCP stdio + `rate-limit` + `session`** | El MCP server usa el framework. Std IO NDJSON (compatible con OpenCode). |
-| **API tools idéntico `fl_*`** | Drop-in replacement para el FLStudioMCP actual. Cliente MCP no nota el cambio. |
+| `heretic-core` se conserva | La capa de blindaje es lo único que los MCPs de Reaper no tienen |
+| `heretic-daw` separado de `heretic-mcp` | El transporte y el ciclo de vida son DAW; las tools son superficie |
+| file-RPC, no `python-reapy` | Las dos dan las mismas 900+ funciones. file-RPC no mete Python dentro de Reaper, que es lo que se rompe primero (DTM, versión, bits) |
+| 4 tools, no 17 | 17 wrappers finos sobre un escape hatch solo añadían mantenimiento, y cada wrapper reimplementaba la construcción de params |
+| Un solo `command.json`, no mailbox de 8 slots | No hay wake ni concurrencia dentro del DAW: un slot basta y es más simple de depurar |
+| vendor-study no se sube al repo | Es material de referencia, no código nuestro |
 
 ---
 
-## 4. Topología final (Fase 4+ completa)
+## 4. Lección de FL que se aplica a Reaper
 
-```
-┌──────────────────────────────────────────────────────────────┐
-│ OpenCode / Claude (MCP client stdio NDJSON)                  │
-└────────────────┬─────────────────────────────────────────────┘
-                 │
-┌────────────────▼─────────────────────────────────────────────┐
-│ fl-heretic mcp (FlojoMCP, Rust)                              │
-│   • Tool registry + schema validation                        │
-│   • Bearer token al handshake                                │
-│   • Reenvía comandos al daemon via Named Pipe                │
-└────────────────┬─────────────────────────────────────────────┘
-                 │ Named Pipe \\.\pipe\fl-heretic-<pid>
-                 │ JSON-RPC 2.0 NDJSON + Bearer HMAC
-┌────────────────▼─────────────────────────────────────────────┐
-│ fl-heretic daemon (Rust, hardened)                           │
-│   ┌─────────────────────────────────────────────────────┐   │
-│   │ Security & control                                  │   │
-│   │   • HMAC Bearer auth │   │
-│   │   • Rate limit por tool (governor)                  │   │
-│   │   • Audit log SQLite WAL append-only                │   │
-│   │   • Capability ACL │   │
-│   │   • Circuit breaker (heartbeat)                     │   │
-│   └─────────────────────────────────────────────────────┘   │
-│   ┌─────────────────────────────────────────────────────┐   │
-│   │ State & cache                                       │   │
-│   │   • Project snapshot (typed, versioned)             │   │
-│   │   • Plugin library index (SQLite, persisted)        │   │
-│   │   • .flp file watch (notify changes)                │   │
-│   │   • Calibration cache (fingerprint → curves)        │   │
-│   │   • Session manager (per-project)                          │   │
-│   └─────────────────────────────────────────────────────┘   │
-│   ┌─────────────────────────────────────────────────────┐   │
-│   │ Transport to FL                                     │   │
-│   │   • MIDI SysEx (primary hoy)                        │   │
-│   │   • .pyscript file-watch bridge (heavy writes)      │   │
-│   │   • .flp direct read (no FL touch)                  │   │
-│   │   • VST3 FlojoBridge (FUTURO Phase 2)               │   │
-│   └─────────────────────────────────────────────────────┘   │
-│   ┌─────────────────────────────────────────────────────┐   │
-│   │ Watchdog                                            │   │
-│   │   • FL alive (heartbeat 500ms)                      │   │
-│   │   • .pyscript armed (re-arm if lost)               │   │
-│   │   • Disk space, port conflicts                      │   │
-│   │   • Auto-restart on crash                           │   │
-│   └─────────────────────────────────────────────────────┘   │
-└────────────────┬─────────────────────────────────────────────┘
-                 │ MIDI loopback / .pyscript / .flp
-┌────────────────▼─────────────────────────────────────────────┐
-│ FL Studio 25 (controller + .pyscript + .flp)                 │
-└──────────────────────────────────────────────────────────────┘
-```
+El bug más caro no fue de FL: fue **nuestro diseño de tools**. En FL, 17
+wrappers finos reconstruían los params cada uno, y ahí se colaron:
+
+- `fl_set_song_position` mandaba `ms` cuando el daemon leía `position` (y el
+  default del daemon era "bars" mientras la tool documentaba milisegundos: un
+  desajuste de 4×).
+- `create_project` no estaba en la tabla de ruteo, así que caía en el handler
+  equivocado.
+- `dir` y `template` eran obligatorios en el schema aunque el código los
+  trataba como opcionales.
+
+**Conclusión:** con N wrappers hay N sitios donde equivocarse. Reaper tiene
+muchas más capacidades que FL, así que el riesgo escala. La mitigación es la
+misma que se decidió para FL: pocas tools con superficies explícitas, y tests
+que fijan el contrato de nombres.
 
 ---
 
-## 5. Estructura del repo
+## 5. Estado y próximos pasos
 
-```
-FLHereticMCP/
-├── Cargo.toml                              # workspace
-├── README.md                               # descripción + quickstart
-├── LICENSE                                 # GPL-3.0
-├── .gitignore                              # build, secrets, runtime data
-├── AGENTS.md                               # este archivo (memoria viva)
-├── AUDIT.md                                # auditoría del FLStudioMCP original
-├── crates/
-│   ├── heretic-core/                       # tipos compartidos, error, auth, audit, protocol
-│   │   ├── Cargo.toml
-│   │   └── src/
-│   │       ├── lib.rs
-│   │       ├── error.rs                    # HereticError enum
-│   │       ├── auth.rs                     # HMAC Bearer
-│   │       ├── audit.rs                    # SQLite WAL append-only
-│   │       ├── protocol.rs                 # JSON-RPC envelope sobre Named Pipe
-│   │       ├── ratelimit.rs                # token bucket por tool
-│   │       ├── circuit.rs                  # circuit breaker (heartbeat)
-│   │       └── acl.rs                      # capabilities JSON
-│   └── heretic-daemon/                     # el daemon blindado
-│       ├── Cargo.toml
-│       └── src/
-│           ├── lib.rs
-│           ├── main.rs                     # binario con subcommand dispatcher (clap)
-│           ├── pipe.rs                     # Named Pipe server (Windows)
-│           ├── commands.rs                 # dispatch JSON-RPC
-│           ├── watchdog.rs                 # supervisor tokio task
-│           └── handlers/
-│               ├── mod.rs
-│               ├── ping.rs                 # ✅ Fase 1
-│               ├── auth.rs                 # handshake + verificación token
-│               └── health.rs               # estado del daemon
-├── examples/
-│   └── ping/                               # cliente mínimo que conecta al daemon
-│       ├── Cargo.toml
-│       └── src/main.rs
-└── scripts/
-    ├── install_windows.ps1                 # installer (controller script, .pyscript, token)
-    └── doctor.ps1                          # diagnóstico
-```
+### Hecho
+- [x] Investigación de alternativas: REAPER es la vía viable
+- [x] Reaper 7.80 instalado
+- [x] MCPs candidatos clonados y analizados (`vendor-study/`)
+- [x] Andamiaje `heretic-daw` con file-RPC (9/9 tests)
+- [x] Todo el trabajo de FL commiteado (`0930996`) antes de borrarlo
 
-Crate futuro (no en Fase 0+1):
-- `heretic-mcp` — el MCP server (Fase 2)
-- `heretic-fl` — el bridge a FL (controller + MIDI SysEx + .flp parser) (Fase 2)
-- `heretic-flp` — parser de `.flp` (ZIP + project.xml) (Fase 4)
+### Pendiente
+- [ ] **Configurar el bridge Lua dentro de Reaper** y confirmar que
+      file-RPC responde de verdad (el E2E de FL no tiene equivalente aún)
+- [ ] Probar `python-reapy` por si compensa el setup de Lua
+- [ ] **FL Studio VSTi en Reaper** para tener FLEX (pista de instrumento, modo
+      song, output "FL 1")
+- [ ] Decidir: usar `xDarkzx` tal cual, fork con la capa de blindaje, o
+      reimplementar sobre `heretic-daw`
+- [ ] Herramientas MCP: empezar por `track`, `fx`, `midi`, `project`
+- [ ] `fl_diagnose` equivalente (¿Reaper vivo? ¿bridge respondiendo?)
+- [ ] Installer automático (el de FL está en `0930996`, se puede portar)
 
 ---
 
-## 6. Plan de fases
+## 6. Reglas para futuras sesiones
 
-### Fase 0 — Setup ✅ done
-- [x] Auditoría brutal del FLStudioMCP → `AUDIT.md`
-- [x] Crear estructura de directorios (`FLHereticMCP/`)
-- [x] `Cargo.toml` workspace con path deps a FlojoMCP
-- [x] `.gitignore`, `LICENSE` (GPL-3.0), `README.md` inicial
-- [x] `AGENTS.md` (este archivo)
-- [x] Rename físico del directorio `FLStudioMCP` → `FLHereticMCP`
-- [x] Repo público: `https://github.com/CerebroCanibalus/fl-heretic-mcp`
-
-### Fase 1 — Daemon básico ✅ done
-- [x] `heretic-core` con tipos compartidos
-  - [x] `error.rs` — `HereticError` enum con `thiserror` (13 variantes, `From` para io/json/sqlite/poisoned)
-  - [x] `auth.rs` — HMAC Bearer + token store + AuthChallenge + AuthResponse + AuthVerifier (constant-time via `subtle`)
-  - [x] `audit.rs` — SQLite WAL append-only + retention via `rotate()` + triggers que bloquean UPDATE/DELETE
-  - [x] `protocol.rs` — JSON-RPC 2.0 envelope (Request, Response, Outcome, ProtocolError, códigos estándar + custom)
-- [x] `heretic-daemon` con Named Pipe server (Windows)
-  - [x] `pipe.rs` — Named Pipe server + handshake HMAC + dispatch JSON-RPC + audit per-request + handlers `ping`/`health`
-  - [x] `commands/mod.rs` + `doctor.rs` + `token.rs` — subcommands CLI
-- [x] Binario `fl-heretic` con subcommand dispatcher (clap)
-  - [x] `fl-heretic mcp` — STUB (implementación Fase 2)
-  - [x] `fl-heretic daemon` — arranca el daemon blindado
-  - [x] `fl-heretic doctor` — diagnóstico
-  - [x] `fl-heretic token generate|rotate|show|path`
-- [x] Comando `ping` funcional via Named Pipe + audit
-- [x] 19 tests unitarios en `heretic-core` (todos pasando)
-- [x] `examples/ping/` — cliente que conecta al daemon y ejecuta `ping`
-- [x] Compila (`cargo build --workspace` y `cargo build --release`)
-- [x] **Smoke test end-to-end verificado** (ver §7 changelog)
-
-### Fase 2 — VST3 plugin + daemon TCP
-- [ ] Setup `vst3-bridge/` con CMake + VST3 SDK
-- [ ] Plugin mínimo: arranca WS/TCP server + responde `meta.ping`
-- [ ] Handlers: transport (start/stop/tempo/status), mixer básico
-- [ ] Daemon re-escrito: cliente TCP al plugin
-- [ ] Compilación Windows (MSVC + CMake) — primera build
-- [ ] **Smoke test**: daemon → plugin → FL API real → respuesta
-
-### Fase 2.5 — Instalador automático (ONE-SHOT)
-- [ ] PowerShell script: detecta FL Studio + MSVC + clona SDK
-- [ ] Compila VST3 + copia a `%COMMONPROGRAMFILES%\VST3\`
-- [ ] Crea template .flp con plugin pre-cargado
-- [ ] Configura FL: template como "Default project"
-- [ ] Compila daemon Rust (release)
-- [ ] Configura MCP server en opencode.jsonc
-- [ ] Genera token + audit DB
-- [ ] Inicia daemon como servicio de Windows
-- [ ] Verifica conexión con `meta.ping`
-- [ ] **Resultado**: usuario corre 1 comando, todo funciona
-
-### Fase 3 — Handlers completos (acceso TOTAL FL API)
-- [ ] channels (CRUD + parámetros)
-- [ ] mixer (tracks, sends, EQ)
-- [ ] plugins (parameters, presets)
-- [ ] patterns (notes, step sequencer)
-- [ ] playlist (clips, markers)
-- [ ] arrangement
-- [ ] automation (record + edit)
-- [ ] project (load, save, undo)
-- [ ] ui (windows, hints)
-
-### Fase 4 — Features avanzadas
-- [ ] Streaming audio en vivo (master output, tracks individuales)
-- [ ] Mutex/lock thread-safe (audio thread ↔ API calls)
-- [ ] State manager + cache invalidation
-- [ ] Re-uso del bridge script como "auto-loader" opcional
-
-### Fase 5 — Maduración
-- [ ] Distribución installer (MSI/EXE)
-- [ ] Signature digital del plugin
-- [ ] Cert VST3 si aplica
-- [ ] Documentación completa + SKILL.md
-
-### Fase 3 — Port completo de tools (drop-in replacement)
-- [ ] Port de las 67 tools del FLStudioMCP al MCP server Rust
-- [ ] Mantener API `fl_*` idéntico
-- [ ] Tests de integración contra FL real
-
-### Fase 4 — Features nuevas (lo que el FLStudioMCP no tiene)
-- [ ] Plugin indexer (SQLite cache + parallel scan)
-- [ ] `.flp` parser (ZIP + project.xml)
-- [ ] Project snapshot completo tipado
-- [ ] Mix Doctor paralelo (peaks en paralelo via `tokio::spawn`)
-- [ ] Calibration engine tipado
-- [ ] Preset catalog + sample indexer
-- [ ] Resources MCP: `fl://status`, `fl://project/inspect`, etc.
-
-### Fase 5 — Maduración
-- [ ] Rate limit real (governor)
-- [ ] Circuit breaker con heartbeat
-- [ ] Capability ACL por defecto "safe"
-- [ ] Watchdog completo
-- [ ] Prompts MCP para workflows
-- [ ] Installer PowerShell
-- [ ] Benchmarks vs Python version
-- [ ] Documentación + SKILL.md
-
-### Fase 6 — VST3 FlojoBridge (game changer)
-- [ ] Plugin VST3 en C++ con SDK de Steinberg
-- [ ] WebSocket server local cuando se carga
-- [ ] MIDI bridge como fallback legacy
-- [ ] Auto-detección de cuál usar
+- **Español** en conversación, **inglés** en código/comments/docs.
+- **Probar antes de declarar terminado.** Con Reaper, de verdad, no contra
+  mocks: el 100% de los bugs caros de FL eran tests que pasaban en local y
+  fallaban contra el DAW real.
+- **No compilar/mover sin luz verde** del usuario.
+- Un test que pasa unas veces y otras no es peor que uno que no pasa: entrena
+  a ignorarlo. Si algo es intermitente, o se aísla, o se documenta por qué.
+- Los docs de FL están en el historial (`git show 0930996`), no en el repo.
 
 ---
 
-## 7. Estado actual (changelog)
+## 7. Referencias
 
-### 2026-09-24/25 — Fase 0 + Fase 1 completas + primer push
-- ✅ Auditoría completa del FLStudioMCP → `AUDIT.md`
-- ✅ Decisión: daemon blindado en Rust, mismo repo, Named Pipes, blindaje PRO
-- ✅ Decisión: nombre "FL Heretic MCP"
-- ✅ Decisión: Fase 0+1 primero (setup + daemon básico)
-- ✅ Rename físico `FLStudioMCP/` → `FLHereticMCP/`
-- ✅ Código Python legacy movido a `legacy/`
-- ✅ Repo público en GitHub: `https://github.com/CerebroCanibalus/fl-heretic-mcp` (cuenta `CerebroCanibalus`)
-- ✅ Workspace Cargo con path deps a `FlojoMCP/crates/flojo-mcp` + `FlojoMCP/crates/flojo-macros` (features: http, rate-limit, session)
-- ✅ Crate `heretic-core`: error tipado, HMAC auth, audit log SQLite WAL append-only, JSON-RPC protocol
-- ✅ Crate `heretic-daemon`: binario `fl-heretic.exe` con subcommands `daemon|mcp|doctor|token`
-- ✅ Named Pipe server funcional con handshake HMAC
-- ✅ Cliente ejemplo `ping` conecta, autentica, ejecuta `ping`, recibe respuesta
-- ✅ Audit log crea archivo SQLite en `%LOCALAPPDATA%\fl-heretic\audit.db`
-- ✅ 19/19 tests unitarios pasan
-- ✅ **Smoke test end-to-end verificado** (ver output en conversación)
-
-### Próximo (Fase 2)
-- Port del controller script legacy Python a Rust (`midir` crate)
-- Nuevo crate `heretic-fl` con bridge MIDI SysEx
-- Tools transport: `fl_ping`, `fl_get_tempo`, `fl_set_tempo`, `fl_play`, `fl_stop`, etc.
-- Nuevo crate `heretic-mcp` con FlojoMCP stdio
-
-### 2026-09-25 (tarde) — HALLAZGO MAYOR: el setup usa `fLMCP Bridge`, NO FLStudioMCP legacy
-
-**El setup del usuario es COMPLETAMENTE diferente** al que asumimos en la auditoría:
-
-1. **NO hay FLStudioMCP legacy instalado.** El controller script activo está en:
-   - `%USERPROFILE%\Documents\Image-Line\FL Studio\Settings\Hardware\fLMCP Bridge\device_FLStudioMCP.py` (72KB, 2049 líneas)
-   - **Bridge v0.2.0**, FL version 38, MIDI scripting v38
-
-2. **`fLMCP Bridge`** (https://github.com/your-handle/fLMCP) es un sistema paralelo:
-   - **TCP** `127.0.0.1:9876` con framing `[BE u32 len][body]` JSON-RPC
-   - **File-RPC** fallback: `$SCRIPT_DIR\rpc_request.json` → `rpc_response.json`
-   - 133 actions agrupadas en: meta, transport, patterns, channels, mixer, plugins, playlist, arrangement, automation, project, ui, pianoroll
-   - **MUCHO más maduro que el FLStudioMCP legacy** (67 tools → 133 actions)
-
-3. **TCP falla en el sandbox de FL 2025**: `daemon threads disabled` + `start_new_thread returned NULL`. Pero **file-RPC SÍ funciona** porque OnIdle del controller script procesa archivos en main thread. Latencia ~200ms (verificado en `tests/test_flmcp_filerpc.py`).
-
-4. **Bug B9** (que arreglamos pensando que era del MIDI SysEx) sigue siendo relevante: el daemon NO debe reportar éxito sin verificar la conexión real.
-
-### Decisión arquitectónica revisada
-
-**OLVIDAR MIDI SysEx** — era el camino equivocado para tu setup. El bridge correcto es **file-RPC** (primario, simple, funciona confirmado) + **TCP** (secundario, mejor performance, requiere threading fuera del sandbox).
-
-### Mapeo de tools a actions
-
-| Nuestro tool | Action fLMCP Bridge |
-|---|---|
-| `fl_ping` | `meta.ping` |
-| `fl_get_tempo` | `transport.status` (extraer `bpm`) |
-| `fl_set_tempo` | `transport.set_tempo` |
-| `fl_play` | `transport.start` |
-| `fl_stop` | `transport.stop` |
-| `fl_get_play_state` | `transport.status` |
-| `fl_get_song_position` | `transport.status` |
-| `fl_set_song_position` | `transport.set_position` |
-
-### Decisión pendiente con el usuario
-
-- [ ] ¿Confirmar adaptar al protocolo `fLMCP Bridge` (file-RPC + TCP) en vez de MIDI SysEx?
-- [ ] ¿Conservar nombre `heretic-fl` o renombrar a `heretic-flmcp`?
-- [ ] ¿Empezar por file-RPC (simple, funciona YA) y dejar TCP para después?
-
-### Commits relevantes
-
-- `c64565d` — código Fase 2 con MIDI SysEx (IRRELEVANTE para este setup)
-- `5377d04` — fixes de compilación (siguen aplicando si reemplazamos)
-- `256b416` — fix B9 (wait_for_first_heartbeat)
-- `d6c3e63` — test file-RPC al fLMCP Bridge (FUNCIONA)
-
----
-
-## 8. Bugs abiertos / descubrimientos críticos
-
-### Bugs del FLStudioMCP que el port debe arreglar
-- B1. **`OnSysEx` missing en controller script legacy** → ya parcheado en upstream (FIX_REPORT §3a), pero el port debe usar `OnSysEx` + `OnMidiMsg` ambos
-- B2. **`midi.REC_Updated` no existe en FL 25+** → usar `midi.REC_UpdateValue`. **Crítico**: usar `REC_FromMIDI` colapsa tempo a ~10 BPM
-- B3. **Sample rate mismatch** → siempre trabajar con tempo `bpm * 1000` interno de FL
-- B4. **MIDI SysEx 1.5KB hard cap** → no se puede saltarse en MIDI; bypass con `.flp` parser + VST3 plugin
-- B5. **Plugin names truncated a 24 chars en listados** → bypass con `truncate_string` configurable, no en disco
-- B6. **No hay forma de cargar plugins nuevos via API** → limitación real de FL, no bug. Documentar y usar `fl_suggest_plugin`
-- B7. **Serum presets walled off** → FL solo expone 128 programas MIDI, no la librería real `.fxp`. Confirmado dead-end (SERUM_PROBE_FINDING). No retry.
-- B8. **No se pueden colocar clips en playlist via API** → confirmado dead-end (ARRANGEMENT_FINDING). Preparar patterns + markers, usuario arrastra.
-
-### Bugs del FL controller script sandbox
-- S1. `open("...", "w")` → `SystemError: <class '_io.FileIO'> returned NULL`
-- S2. `os.open(..., O_WRONLY|O_CREAT)` → `TypeError: bad argument type for built-in operation`
-- S3. `os.makedirs(...)` → `SystemError: mkdir returned NULL without setting an exception`
-- S4. `socket`, `subprocess`, `urllib` → no están en built-in module list
-
-→ **Conclusión**: MIDI SysEx es el único canal bidireccional always-on en el controller script. El `.pyscript` del piano roll tiene file I/O pero solo corre on-demand (UX horrible).
-
-**ACTUALIZACIÓN 2026-09-25**: el setup REAL del usuario usa `fLMCP Bridge` (NO FLStudioMCP legacy). MIDI SysEx NO aplica. El bridge correcto es file-RPC + TCP sobre JSON-RPC. Ver sección §7 changelog.
-
-## 9. Próximos pasos inmediatos
-
-1. **Rename físico** del directorio `FLStudioMCP` → `FLHereticMCP` (ver §10)
-2. **Crear el workspace Cargo** completo
-3. **Implementar `heretic-core`** (tipos, error, auth, audit, protocol)
-4. **Implementar `heretic-daemon`** (Named Pipe server + comando `ping`)
-5. **Compilar y testear** el path completo MCP-less (cliente ping → daemon)
-6. **Documentar** resultados en §7
-
----
-
-## 10. Rename: FLStudioMCP → FLHereticMCP ✅ done
-
-### Acción ejecutada
-- ✅ Directorio renombrado: `D:\Mis Juegos\ClaudeMCPs\FLStudioMCP\` → `D:\Mis Juegos\ClaudeMCPs\FLHereticMCP\`
-- ✅ Backup del viejo en `D:\Mis Juegos\ClaudeMCPs\FLStudioMCP_OLD_BACKUP` (pendiente eliminar tras validar)
-- ✅ Código Python legacy movido a `FLHereticMCP/legacy/` (preservado, no se desarrolla)
-- ✅ Repo GitHub público creado: `https://github.com/CerebroCanibalus/fl-heretic-mcp`
-- ✅ Remote `origin` apunta al repo nuevo (sin upstream)
-- ✅ Initial commit: `59edad0 feat: initial commit as FL Heretic MCP`
-- ✅ Fase 1 commit: `64949be feat: Fase 0+1 — workspace Cargo + daemon blindado básico`
-
-### Estructura actual
-```
-FLHereticMCP/
-├── Cargo.toml                  # workspace
-├── Cargo.lock
-├── AGENTS.md                   # este archivo (memoria viva)
-├── AUDIT.md                    # auditoría brutal
-├── README.md                   # descripción + quickstart + arquitectura
-├── LICENSE                     # GPL-3.0
-├── .gitignore                  # Rust + secrets
-├── CONTRIBUTING.md             # legacy (pendiente actualizar)
-├── ROADMAP.md                  # legacy (pendiente actualizar)
-├── crates/
-│   ├── heretic-core/           # error, auth, audit, protocol ✅
-│   └── heretic-daemon/         # binario fl-heretic + Named Pipe server ✅
-├── examples/
-│   └── ping/                   # cliente mínimo ✅
-├── scripts/                    # pendiente: installer PowerShell
-├── docs/                       # preservado del legacy (referencia)
-│   ├── CHANGELOG.md            # histórico v0.1/v0.2
-│   ├── FIX_REPORT.md           # bugs del controller script
-│   ├── SERUM_PROBE_FINDING.md  # findings críticos
-│   └── ...
-└── legacy/                     # código Python preservado (no se desarrolla)
-    ├── pyproject.toml
-    ├── src/fl_studio_mcp/      # código Python completo
-    ├── fl_controller/          # controller script .py
-    └── ...
-```
-
----
-
-## 11. Comandos útiles (referencia)
-
-```bash
-# Build
-cargo build --release                    # workspace completo
-cargo build -p heretic-daemon --release  # solo daemon
-
-# Test
-cargo test --workspace
-cargo test -p heretic-core               # solo core
-cargo test -p heretic-daemon             # solo daemon
-
-# Lint
-cargo clippy --workspace --all-targets -- -D warnings
-cargo fmt --all -- --check
-
-# Run
-./target/release/fl-heretic.exe daemon   # arranca daemon
-./target/release/fl-heretic.exe mcp      # arranca MCP server (Fase 2+)
-./target/release/fl-heretic.exe doctor   # diagnóstico
-./target/release/fl-heretic.exe token generate
-
-# Examples
-cargo run -p ping                        # cliente ping → daemon
-```
-
-### Variables de entorno
-- `RUST_LOG=info` — nivel de tracing
-- `FL_HERETIC_DATA_DIR` — override de `%LOCALAPPDATA%\fl-heretic` (default Windows)
-- `FL_HERETIC_PIPE_NAME` — override de `\\.\pipe\fl-heretic-<pid>`
-- `FL_HERETIC_TOKEN_PATH` — override del path del token
-
-### Paths importantes
-- Token: `%LOCALAPPDATA%\fl-heretic\token`
-- Audit DB: `%LOCALAPPDATA%\fl-heretic\audit.db`
-- Logs: `%LOCALAPPDATA%\fl-heretic\logs\`
-- Project snapshots: `%LOCALAPPDATA%\fl-heretic\snapshots\<project-hash>\`
-
----
-
-## 12. Referencias externas
-
+- **REAPER ReaScript API**: https://www.reaper.fm/sdk/reascript/reascripthelp.html
+- **python-reapy**: https://python-reapy.readthedocs.io/
+- **xDarkzx/Reaper-MCP** (el candidato más sólido): https://github.com/xDarkzx/Reaper-MCP
+- **FL Studio como plugin**: https://www.image-line.com/fl-studio-learning/fl-studio-online-manual/html/flstudio_vst_plugin.htm
+- **Por qué Cubase tampoco vale**: https://forums.steinberg.net/t/full-scripting-api-for-cubase-the-ai-integration-gap-is-now-a-competitive-threat/1026258
 - **FlojoMCP** (framework): `D:\Mis Juegos\ClaudeMCPs\FlojoMCP\`
-  - `DESIGN.md` — diseño completo del framework
-  - `AGENTS.md` — convenciones del framework (build.bat, Rust 2024, etc.)
-  - `crates/flojo-mcp/` — runtime, errores, FlojoTester
-  - `crates/flojo-macros/` — proc-macros `#[tool]`, `#[flojo_mcp]`
-- **FLStudioMCP original** (legacy): preservado en `legacy/` o en git history
-  - `AUDIT.md` — auditoría completa
-  - `docs/` — hallazgos críticos del comportamiento de FL
-- **FL Studio MIDI scripting**: https://www.image-line.com/fl-studio-download/fl-studio-2025/
-- **MIDI SysEx spec**: https://www.midi.org/specifications
-
----
-
-## 13. Notas de estilo (para futuras sesiones)
-
-- **Español** para conversación, **inglés** para código/comments/docs.
-- **Brutalmente honesto** en auditorías y reviews — no pintar nada bonito.
-- **Reglas globales** de `C:\Users\Admin\.config\opencode\AGENTS.md` aplican.
-- **Notación simbólica** (`→`, `⊘`, `⊕`, `∴`, `∀`, `∃`) cuando el documento esté compactado.
-- **Términos en español cuando aporten** (`q/`, `c/`, `s/`, `p/`, `d/`, `nec`, `imp`, `crit`, `cfg`, `dep`, `env`).
-- **Probar antes de declarar terminado.** Tests con `FlojoTester`-style + smoke tests reales contra el daemon.
-- **Documentar descubrimientos** en §8 inmediatamente.
-- **Una decisión por pregunta.** No apilar decisiones en una sola.
-
----
-
-## 14. HALLAZGOS DEL SANDBOX DE FL STUDIO 2025 (medidos, no supuesto)
-
-Todos estos datos vienen de `tests/probe_sandbox.py`, ejecutado DENTRO de FL Studio
-2025 (MIDI scripting v38, FL version 38) el 2026-09-25. Los resultados se leen en
-`.../FL Studio/Settings/Hardware/HereticProbe/probe_result.json`.
-
-### Lo que FUNCIONA
-
-| Capacidad | Veredicto |
-|---|---|
-| `open()` lectura/escritura de ficheros en el script dir | **OK** — `write+read = 'hola'` |
-| FL API completa (`channels`, `mixer`, `transport`, `playlist`, `arrangement`, `patterns`, `plugins`, `ui`, `general`, `midi`, `device`) | **OK** |
-| `exec()` de Python arbitrario (action `meta.exec`) | **OK** — da acceso a ~250 funciones |
-
-### Lo que está BLOQUEADO (todos con el mismo patrón "returned NULL without setting an exception")
-
-| Operación | Error exacto |
-|---|---|
-| Threads (daemon) | `RuntimeError: daemon threads are disabled in this (sub)interpreter` |
-| Threads (cualquiera) | `SystemError: <built-in function start_new_thread> returned NULL` |
-| `import ctypes` | **`ImportError: module _ctypes does not support loading in subinterpreters`** |
-| `socket.socket()` | `<slot wrapper '__init__' of '_socket.socket' objects> returned NULL` |
-| `open(r"\\.\pipe\...")` (cliente) | `<class '_io.FileIO'> returned NULL` |
-| `os.rename` | `<built-in function rename> returned NULL` |
-| `os.mkdir` | `<built-in function mkdir> returned NULL` |
-| `os.unlink` | falla en silencio (el fichero sigue ahí) |
-| `glob` / listado de directorio | `<built-in function audit> returned NULL` (falla en silencio, devuelve vacío) |
-| `__file__` | **no está definido** — `NameError`. Calcular el path desde `USERPROFILE` |
-| `os.mkfifo` | no existe (Windows) |
-
-### Consecuencias de diseño (duraderas)
-
-- **C1. Named Pipes son IMPOSIBLES.** Un pipe servidor exige `CreateNamedPipeW`
-  (Win32), y `ctypes` está bloqueado a nivel de sub-intérprete. Ni siquiera el rol
-  de cliente funciona vía `open()`. **No es una decisión de diseño nuestra: es
-  que no existe IPC por pipe desde el script de FL.** Investigado y cerrado.
-- **C2. TCP desde el script es IMPOSIBLE.** `socket` bloqueado. El puerto
-  9876 nunca se abre. El propio bridge lo detecta y degrada a file-RPC.
-  Medido: TCP 0/5, file-RPC 5/5.
-- **C3. `OnIdle` NUNCA se dispara.** `idle_ticks = 0` tras cargar el script.
-  Coincide con `docs/FL2025_SANDBOX.md` del repo `Boyan253/fl-studio-2025-ai-bridge`
-  (build 25.2.5 / v40). Cualquier pump desde `OnIdle` es un dead end.
-- **C4. El pump real es por MIDI.** El pump del file-RPC corre en `OnMidiIn` /
-  `OnMidiMsg`, no en `OnIdle`. **El MIDI no es el canal de datos, es el
-  despertador**: el servidor escribe la request y luego manda un byte MIDI al
-  puerto configurado para que FL despierte y la procese.
-- **C5. El file-RPC no tiene transporte alternativo posible.** `open()` sobre
-  ficheros normales es lo ÚNICO que el sandbox permite. No hay plan B.
-- **C6. Latencia medida: 21-63 ms, media ~42 ms** sobre 5 muestras. Limitada por
-  la latencia de `OnIdle`/MIDI de FL, no por el transporte. Por eso el TCP no
-  habría mejorado nada aunque funcionase: se bombea desde el mismo sitio.
-
-### El bridge de fLMCP v0.2.0 (el que está instalado)
-
-- 133 actions en 12 grupos: meta 3, transport 14, patterns 13, channels 20,
-  mixer 18, plugins 13, playlist 14, arrangement 5, automation 5, project 11,
-  ui 7, pianoroll 10. Catálogo en `crates/heretic-fl/src/bridge.rs::ACTIONS`.
-- **Los nombres son `camelCase`**: `transport.setTempo`, `channels.setVolume`.
-  No `set_tempo` / `set_volume`. Regresión ya cubierta por un test.
-- **Los params son `index`/`volume` (channels) y `track`/`volume` (mixer)**.
-- **Incluye `meta.exec`**: ejecuta una string de Python en el intérprete vivo.
-  Es la palanca de mayor alcance: da las ~250 funciones de FL sin escribir
-  handlers. Ver `docs/FL2025_SANDBOX.md`, sección "Breakthrough 1".
-- Limitaciones conocidas: `os.rename` bloqueado → la respuesta se escribe
-  **sin atomicidad** (el lector debe tolerar JSON a medias); ficheros fijos
-  (no mailbox) → riesgo de colisión si hay dos peticiones simultáneas.
-
-### Estado de la decisión sobre el transporte
-
-- **VST3 plugin: DESCARTADO.** Se borraron `vst3-bridge/` y `fLMCP-bridge/`. Razón:
-  el plugin resultó ser un proxy que reenvía mensajes a un fichero JSON, sin
-  acceso a FL API (Image-Line no publica ningún SDK para VST3), y no compilaba
-  (CMake 4.3 vs VST3 SDK 3.7.7). Detalle en `git log c64565d..412db74`.
-- **MIDI SysEx: DESCARTADO** (commit `c64565d`, conservado solo como historia).
-- **file-RPC: lo único viable.** Ver C1-C5.
-
----
-
-## 15. GESTION DE PROYECTO EN FL (medido, no supuesto)
-
-### La API de proyecto de FL no existe
-
-`dir(general)` no tiene `saveProject`, ni `getProjectFilePath`, ni
-`getProjectName`, ni `newProject`. Comprobado sobre los 909 simbolos de los
-11 modulos. Lo unico de guardado es `general.saveUndo()`, que es un punto de
-undo, no a disco.
-
-De las **79** constantes `midi.FPT_*` solo hay `FPT_Save` (Ctrl+S) y
-`FPT_SaveNew`. **No existe `FPT_New`, ni `FPT_Open`, ni `FPT_Close`.**
-
-### FPT_Save SI funciona (verificado)
-
-Sobre un proyecto **con ruta**, `transport.globalTransport(midi.FPT_Save, 1)`
-guarda en disco sin abrir dialogo. Prueba:
-
-| | Antes | Despues |
-|---|---|---|
-| SHA-256 del .flp | 91ea14e4 | e0dbb294 |
-| mtime | 16:23:02 | 16:31:55 |
-| `general.getChangedFlag()` | 1 | 0 |
-
-Latencia: ~90 ms.
-
-Ojo: `has_file` de `project.metadata` devuelve `false` incluso con el
-proyecto abierto desde una ruta, porque se basa en `getProjectTitle()`, que
-FL no rellena. **No se puede detectar por la API si un proyecto tiene
-ruta**; hay que deducirlo de la ventana. Aun asi, `FPT_Save` funciona: FL
-si conoce su propia ruta.
-
-### El dialogo de "Save as" NO se puede automatizar
-
-Cuatro vias, todas fallidas contra FL Studio 2025 real:
-
-1. **Ctrl+Shift+S**: no es el atajo de "Save as". El dialogo nunca aparece.
-2. **`FPT_Menu`**: abre el menu rapido contextual (`TQuickPopupMenuWindow`),
-   no el menu File. Recorriendo las 13 posiciones con `FPT_Down` + `FPT_Enter`
-   no aparece ningun dialogo de guardado.
-3. **`FPT_SaveNew`**: **si** abre el dialogo la primera vez
-   (`TNewProjForm`, titulo "Save as"). Sus campos son `TQuickEdit`,
-   controles Delphi internos. Aceptan `WM_SETTEXT`, pero al confirmar con
-   Enter el dialogo se cierra **sin guardar**: el titulo de la ventana pasa
-   a "Project_3.flp" y no existe ningun `Project_*.flp` en el disco. En el
-   segundo intento `FPT_SaveNew` deja de abrir el dialogo porque el proyecto
-   ya tiene nombre en memoria.
-4. **Leer la barra de menus por Win32**: el `TNewMenu` de la ventana
-   principal existe y `GetMenu` devuelve un handle, pero `GetMenuItemCount`
-   da 0: es un menu **owner-draw** (los items se dibujan a mano, no son items
-   de Win32). No se pueden leer sus textos.
-
-Conclusion: la UI de FL resiste la automatizacion. Un `.flp` es un fichero, y
-ahi si se puede trabajar.
-
-### Lo que si funciona: crear por copia de plantilla
-
-Un `.flp` es un formato binario propio (cabecera `FLhd`, no es un ZIP).
-`new-project` copia una plantilla a la ruta destino y opcionalmente lanza
-FL con ella. Sin teclado, sin dialogos, sin robar el foco.
-
-### Plantillas disponibles
-
-| Fichero | Bytes | Contenido |
-|---|---|---|
-| `TemplateProject.flp` | 53.381 | 5 canales: 4 "808" **sin instrumento** (type 0) + FLEX Bass (type 2). 0 patrones, 0 notas. |
-| `emptyProject.flp` | 46.347 | Realmente vacio: 1 canal "Sampler" (el que FL crea solo), 0 patrones, tempo 140. |
-
-Las dos estan en `D:\Mis Juegos\ClaudeMCPs\FLStudioMCP\TemplateProject\`.
-
-### Trampa de PowerShell
-
-`Start-Process -FilePath FL64.exe -ArgumentList "C:\ruta\con espacios\p.flp"`
-parte la ruta y FL responde "The file Studio\Projects\p.flp could not be
-found". El codigo propio usa `Command::arg()`, que en Windows entrecomilla
-solo, asi que `fl-heretic open <ruta>` no tiene ese problema.
-
-### Comandos
-
-```bash
-fl-heretic config template <ruta.flp>     # fija la plantilla de los nuevos
-fl-heretic new-project <nombre>           # crea y abre
-fl-heretic new-project <nombre> --no-open # solo crea el fichero
-fl-heretic open <ruta.flp>                # abre un .flp existente
-```
-
+- **Historial de FL**: `git show 0930996` en este repo
