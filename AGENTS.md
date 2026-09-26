@@ -227,6 +227,33 @@ porqué, pero esta lista es el aviso rápido.
 - Regenerar: `python tools/gen_api_docs.py` (HTML -> JSON) y
   `python tools/gen_api_md.py` (JSON -> MD). **El .md no se edita a mano.**
 
+### Un dialogo abierto NO es un DAW parado
+
+Medido con el aviso de evaluacion de Reaper en pantalla: `daw_health` decia
+`bridge: ok` con las 162 acciones mientras `daw_debug` decia CONGELADO. Los dos
+no pueden ser verdad.
+
+El aviso sale **despues** de que el bridge arranque y el bucle de ReaScript
+sigue corriendo: no bloquea nada. Un agente no puede distinguir "este dialogo
+me tapa" de "este dialogo esta aqui" mirando la ventana; solo preguntándoselo
+al DAW. Por eso `daw_debug` pregunta antes de clasificar, y el criterio es:
+
+- DAW contesta + dialogo abierto → informativo
+- DAW mudo + dialogo abierto → bloqueante, con su texto
+
+### El aviso de evaluacion de Reaper
+
+- Cambia el **texto del boton** entre arranques: "Still Evaluating" un dia,
+  "Buy Me [4]" otro. Por eso la huella mira el cuerpo ("REAPER IS NOT FREE"),
+  que no varia, y no el boton.
+- **Ignora `WM_CLOSE`**: medido, sigue en pantalla despues de enviarlo. No hay
+  forma automatica de quitarlo.
+- No bloquea el DAW (ver arriba), asi que no hace falta quitarlo. El skip es
+  una red, no un paso del arranque.
+- Nunca se pulsa un boton suyo: "buscar un boton conocido" en un dialogo de
+  licencia acaba metiendo al usuario en la tienda. Se cierra la ventana, y solo
+  si el DAW esta mudo.
+
 ### El fixture que se autoniega
 
 `wav.rs` genera 4 señales con respuesta conocida. Lo importante no son los
