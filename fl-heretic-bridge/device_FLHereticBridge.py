@@ -1014,6 +1014,29 @@ def _pick_pending():
 
 
 
+# FL lanza "Operation unsafe at current time" cuando se le pide tocar el
+# proyecto mientras hay un dialogo modal abierto (guardar, cargar plugin,
+# un Save as...). No es un bug del handler: es FL diciendo "ahora no".
+#
+# Se reintenta con backoff corto, porque casi siempre el dialogo se cierra
+# enseguida (por ejemplo al abrir un proyecto: el daemon lanza FL y enseguida
+# llama a setTempo, pero FL todavia esta cargando). Medido: sin reintento, un
+# setTempo justo despues de abrir un proyecto falla siempre.
+UNSAFE_RETRY_DELAYS = (0.0, 0.15, 0.40, 0.90)
+UNSAFE_MARKER = "unsafe at current time"
+
+
+def _is_unsafe(exc):
+    return UNSAFE_MARKER in str(exc).lower()
+
+
+def _unsafe_hint():
+    return ("FL tiene un dialogo modal abierto (guardando, cargando un plugin "
+            "o similar), asi que rechaza cambios del proyecto. Espera a que "
+            "termine y reintenta. Si persiste, mira si hay un dialogo abierto "
+            "en la ventana de FL Studio.")
+
+
 def _handle(req):
     rid = req.get("id", 0)
     name = req.get("action", "")
@@ -1025,13 +1048,29 @@ def _handle(req):
         return {"id": rid, "ok": False,
                 "error": "action desconocida: %r" % name,
                 "available": len(HANDLERS)}
-    try:
-        result = handler(params)
-        return {"id": rid, "ok": True, "result": result}
-    except Exception as e:
-        return {"id": rid, "ok": False,
-                "error": "%s: %s" % (type(e).__name__, e),
-                "traceback": traceback.format_exc(limit=4)}
+
+    last_exc = None
+    for attempt, delay in enumerate(UNSAFE_RETRY_DELAYS):
+        if delay:
+            time.sleep(delay)
+        try:
+            result = handler(params)
+            if attempt:
+                return {"id": rid, "ok": True, "result": result,
+                        "retries": attempt}
+            return {"id": rid, "ok": True, "result": result}
+        except Exception as e:
+            if not _is_unsafe(e):
+                return {"id": rid, "ok": False,
+                        "error": "%s: %s" % (type(e).__name__, e),
+                        "traceback": traceback.format_exc(limit=4)}
+            last_exc = e
+    # Agotados los reintentos: el dialogo modal sigue abierto.
+    return {"id": rid, "ok": False,
+            "error": "%s: %s" % (type(last_exc).__name__, last_exc),
+            "retryable": True,
+            "hint": _unsafe_hint(),
+            "traceback": traceback.format_exc(limit=4)}
 
 
 def pump():

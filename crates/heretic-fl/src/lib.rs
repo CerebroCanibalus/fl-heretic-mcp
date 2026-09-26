@@ -1,4 +1,4 @@
-//! `heretic-fl` — cliente del fLMCP Bridge (controller script de FL Studio).
+//! `heretic-fl` — cliente del FL Heretic Bridge (controller script de FL Studio).
 //!
 //! # Topología
 //!
@@ -19,7 +19,7 @@
 //!
 //! # Actions
 //!
-//! El bridge expone 133 actions (`bridge::ACTIONS`). Este crate da:
+//! El bridge expone 67 actions (`bridge::ACTIONS`). Este crate da:
 //! - `FlBridge::call(action, params)` para reacharlas todas.
 //! - Helpers tipados (`play`, `set_tempo`, ...) para el camino caliente.
 
@@ -30,6 +30,7 @@
 #![warn(missing_debug_implementations)]
 
 pub mod bridge;
+pub mod dialogs;
 pub mod file_rpc;
 pub mod midi;
 pub mod process;
@@ -38,6 +39,7 @@ pub mod newproj;
 pub use bridge::{
     default_script_dir, BridgeConfig, BridgeInfo, FlBridge, TransportStatus, ACTIONS,
 };
+pub use dialogs::{blocking_modal_class, close_welcome_wizard};
 pub use file_rpc::FileRpc;
 pub use process::{FlProcess, FlStatus, close, find_fl_exe, kill, launch, running_process, status};
 pub use newproj::{

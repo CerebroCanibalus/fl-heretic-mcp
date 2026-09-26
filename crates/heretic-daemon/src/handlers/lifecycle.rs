@@ -80,14 +80,58 @@ impl Lifecycle {
             .ok_or_else(|| HereticError::InvalidRequest("open: falta 'path'".into()))?;
         let wait = params.get("wait").and_then(|v| v.as_u64()).unwrap_or(20);
 
+        // Guardar el proyecto actual ANTES de abrir otro.
+        //
+        // Si el proyecto abierto tiene cambios sin guardar, FL abre un
+        // 'Save changes?' (TMsgForm, modal) que congela el bridge y hace que
+        // toda escritura falle con 'Operation unsafe at current time'.
+        // Medido: por eso la 1a corrida de un test pasaba y las siguientes no.
+        //
+        // Se resuelve por la via que ya se sabe que funciona: FPT_Save
+        // (Ctrl+S), no pulsando el boton del dialogo a ciegas. Ese boton es
+        // 'Yes', pero automatizar un 'Save changes?' sobre un proyecto con
+        // trabajo sin guardar seria sobrescribirlo sin querer.
+        let mut guard = json!({ "saved": false });
+        if heretic_fl::running_process().is_some() {
+            let changed = self
+                .bridge
+                .call("project.metadata", json!({}))
+                .await
+                .ok()
+                .and_then(|v| v.get("changed").and_then(Value::as_bool))
+                == Some(true);
+            if changed {
+                match self.bridge.call("project.save", json!({})).await {
+                    Ok(_) => guard = json!({ "saved": true, "why": "el proyecto estaba sucio" }),
+                    Err(e) => {
+                        // No se bloquea el open: peor un aviso que no poder
+                        // abrir el proyecto. El aviso va en la respuesta.
+                        guard = json!({
+                            "saved": false,
+                            "error": e.to_string(),
+                            "why": "no se pudo guardar; FL puede pedir 'Save changes?'",
+                        });
+                    }
+                }
+            }
+        }
+
         let already = heretic_fl::running_process();
         let p = PathBuf::from(path);
         let proc = heretic_fl::launch(Some(&p), wait)?;
+
+        // FL muestra el 'Welcome to FL Studio' si arranca sin proyecto. Es
+        // modal: congela el pump del bridge y hace que toda escritura falle
+        // con 'Operation unsafe at current time'. Se cierra antes de esperar,
+        // o el `wait_ready` de abajo no terminaria nunca.
+        let wizard = heretic_fl::close_welcome_wizard();
 
         Ok(json!({
             "opened": path,
             "was_running": already.is_some(),
             "pid": proc.pid,
+            "closed_welcome_wizard": wizard.closed,
+            "saved_before_open": guard,
             "note": if already.is_some() {
                 "FL Studio ya estaba corriendo: el proyecto se abrio en esa instancia"
             } else {
@@ -153,6 +197,32 @@ impl Lifecycle {
             .map(PathBuf::from);
         let open = params.get("open").and_then(Value::as_bool).unwrap_or(true);
 
+        // Mismo motivo que en `open`: si el proyecto actual esta sucio, FL
+        // abre un 'Save changes?' modal al cargar el nuevo y deja el bridge
+        // inservible. Se guarda antes, con FPT_Save.
+        let mut guard = json!({ "saved": false });
+        if heretic_fl::running_process().is_some() {
+            let changed = self
+                .bridge
+                .call("project.metadata", json!({}))
+                .await
+                .ok()
+                .and_then(|v| v.get("changed").and_then(Value::as_bool))
+                == Some(true);
+            if changed {
+                match self.bridge.call("project.save", json!({})).await {
+                    Ok(_) => guard = json!({ "saved": true, "why": "el proyecto estaba sucio" }),
+                    Err(e) => {
+                        guard = json!({
+                            "saved": false,
+                            "error": e.to_string(),
+                            "why": "no se pudo guardar; FL puede pedir 'Save changes?'",
+                        });
+                    }
+                }
+            }
+        }
+
         let dir_ref = dir.as_deref();
         let tpl_ref = template.as_deref();
         let path = heretic_fl::create_project_file(&name, dir_ref, tpl_ref)?;
@@ -162,6 +232,7 @@ impl Lifecycle {
             "created": path.display().to_string(),
             "file_size": size,
             "opened": false,
+            "saved_before_open": guard,
         });
 
         if open {
@@ -169,10 +240,37 @@ impl Lifecycle {
                 Ok(proc) => {
                     out["opened"] = json!(true);
                     out["pid"] = json!(proc.pid);
+                    // Mismo caso que `open`: el wizard modal dejaria el
+                    // bridge dormido para siempre.
+                    let wizard = heretic_fl::close_welcome_wizard();
+                    out["closed_welcome_wizard"] = json!(wizard.closed);
                     // Da tiempo a que FL levante el bridge antes de devolver,
                     // o el primer comando del LLM fallara por timeout.
-                    let _ = self.wait_ready(json!({ "timeout": 30 })).await;
-                    out["bridge_ready"] = json!(true);
+                    //
+                    // Ojo: el resultado NO se descarta. Antes se hacia
+                    // `let _ = ...` y se ponia `bridge_ready: true` a pelo,
+                    // asi que si el bridge no respondia en 30s la tool
+                    // mintia: el LLM creia que podia operar y la siguiente
+                    // llamada fallaba sin saber por que.
+                    match self.wait_ready(json!({ "timeout": 30 })).await {
+                        Ok(info) => {
+                            out["bridge_ready"] = json!(true);
+                            if let Some(v) = info.get("bridge_version") {
+                                out["bridge_version"] = v.clone();
+                            }
+                        }
+                        Err(e) => {
+                            out["bridge_ready"] = json!(false);
+                            out["bridge_error"] = json!(e.to_string());
+                            out["hint"] = json!(
+                                "el fichero se creo y FL se abrio, pero el bridge no \
+                                 respondio. Comprueba que el controller script \
+                                 'FL Heretic Bridge' este seleccionado en \
+                                 Options > MIDI Settings, y que FL no tenga un \
+                                 dialogo modal abierto. Reintenta con fl_wait_ready."
+                            );
+                        }
+                    }
                 }
                 Err(e) => {
                     out["open_error"] = json!(e.to_string());

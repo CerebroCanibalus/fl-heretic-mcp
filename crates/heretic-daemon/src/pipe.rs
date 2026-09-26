@@ -145,6 +145,14 @@ async fn serve(
     let midi_ports = heretic_fl::midi::open_all();
     tracing::info!("  MIDI out:   {midi_ports} puerto(s) abiertos (wake)");
 
+    // Si FL ya esta corriendo pero con el 'Welcome to FL Studio' abierto, el
+    // bridge esta vivo pero DORMIDO: el wizard es modal, no procesa el pump y
+    // FL rechaza las escrituras con 'unsafe'. Como el daemon es quien
+    // supervisa a FL, es su trabajo despejarlo antes de esperar al bridge.
+    if heretic_fl::close_welcome_wizard().closed {
+        tracing::info!("  cerrado el 'Welcome to FL Studio' que bloqueaba a FL");
+    }
+
     if config.wait_for_bridge {
         tracing::info!("verificando FL Heretic Bridge (meta.ping)...");
         match bridge.ping().await {
@@ -168,33 +176,90 @@ async fn serve(
     let transport = Arc::new(Transport::new(bridge.clone()));
     let lifecycle = Arc::new(Lifecycle::new(bridge));
 
-    // 2. Bind Named Pipe
-    let mut server = ServerOptions::new()
-        .create(&config.pipe_name)
-        .map_err(|e| HereticError::Other(format!("create named pipe {}: {e}", config.pipe_name)))?;
-    tracing::info!("Named Pipe server bound: {}", config.pipe_name);
+    // 2. Named Pipe con N instancias, cada UNA en su propio `connect()`.
+    //
+    // Por que N y no una sola: el cliente MCP abre una conexion por tool call,
+    // y un agente lanza varias tools a la vez. Con una unica instancia, la
+    // tercera conexion simultanea recibe ERROR_PIPE_BUSY (os error 231,
+    // "todas las instancias de canalizacion estan en uso"). Medido con el E2E:
+    // dos tool calls seguidas pasaban y la tercera en paralelo fallaba.
+    //
+    // Detalle que cuesta un rato: crear N instancias NO basta. Hay que dejar
+    // las N esperando en `connect()` a la vez. Si solo una llama a `connect()`,
+    // las demas quedan creadas pero sin escuchar, el cliente se cuelga contra
+    // una instancia inerte y todo va a timeout (medido: 1/12 con exito).
+    const PIPE_INSTANCES: usize = 16;
 
-    // 3. Accept loop
-    loop {
-        if let Err(e) = server.connect().await {
-            tracing::error!("accept error: {e}");
-            return Err(HereticError::Io(e));
-        }
-        // Tras connect(), el MISMO server queda listo para I/O.
-        let client = server;
-        server = ServerOptions::new()
-            .create(&config.pipe_name)
-            .map_err(|e| HereticError::Other(format!("recreate named pipe: {e}")))?;
+    // `config` se mueve dentro de cada tarea, asi que el nombre del pipe se
+    // saca antes para poder clonar un String barato por tarea.
+    let pipe_name = config.pipe_name.clone();
+
+    let mut accepts = Vec::with_capacity(PIPE_INSTANCES);
+    for i in 0..PIPE_INSTANCES {
+        let server = ServerOptions::new().create(&pipe_name)
+            .map_err(|e| HereticError::Other(format!("create named pipe {pipe_name}: {e}")))?;
+        // Cada tarea se lleva su propia copia del nombre: el `async move` de
+        // abajo se aduna de la de fuera, y sin clonarla solo la primera
+        // instancia tendria nombre que recrear.
+        let pipe_name = pipe_name.clone();
         let verifier = Arc::new(AuthVerifier::new(token.clone()));
         let audit = audit.clone();
         let transport = transport.clone();
         let lifecycle = lifecycle.clone();
-        tokio::spawn(async move {
-            if let Err(e) = handle_client(client, verifier, audit, transport, lifecycle).await {
-                tracing::warn!("client disconnected: {e}");
+
+        accepts.push(tokio::spawn(async move {
+            // Cada tarea se queda esperando SU cliente. En cuanto entra, lo
+            // sirve; y como ya no queda instancia libre para el siguiente,
+            // crea una nueva y vuelve a esperar. Asi la capacidad se mantiene
+            // sola sin huecos ni ventana de ERROR_PIPE_BUSY.
+            let pipe_name = &pipe_name;
+            let mut server = server;
+            loop {
+                match server.connect().await {
+                    Ok(()) => {}
+                    Err(e) => {
+                        tracing::warn!("accept error en instancia {i}: {e}");
+                        // Sin instancia no hay nada que reponer: se sale.
+                        return;
+                    }
+                }
+                let client = std::mem::replace(
+                    &mut server,
+                    match ServerOptions::new().create(pipe_name) {
+                        Ok(s) => s,
+                        Err(e) => {
+                            tracing::error!("recrear instancia del pipe: {e}");
+                            return;
+                        }
+                    },
+                );
+                // Los handles se comparten entre clientes, asi que esta
+                // iteracion los mueve: hay que clonarlos otra vez para la
+                // siguiente vuelta del bucle.
+                if let Err(e) = handle_client(
+                    client,
+                    verifier.clone(),
+                    audit.clone(),
+                    transport.clone(),
+                    lifecycle.clone(),
+                )
+                .await
+                {
+                    tracing::debug!("client disconnected: {e}");
+                }
             }
-        });
+        }));
     }
+    tracing::info!(
+        "Named Pipe server bound: {} ({PIPE_INSTANCES} instancias)",
+        config.pipe_name
+    );
+
+    // El daemon vive mientras vivan las tareas de accept.
+    for a in accepts {
+        let _ = a.await;
+    }
+    Ok(())
 }
 
 /// Maneja una conexión: handshake + dispatch loop.
@@ -302,7 +367,13 @@ async fn send_response<W: tokio::io::AsyncWrite + Unpin>(
 /// de FL Studio. Se comprueban ANTES que los de transport para que `status`,
 /// por ejemplo, no choque con el `status` del transporte.
 const LIFECYCLE_METHODS: &[&str] = &[
-    "open", "launch", "save", "save_as", "close", "fl_status", "wait_ready",
+    "open",
+    "launch",
+    "save",
+    "create_project",
+    "close",
+    "fl_status",
+    "wait_ready",
 ];
 
 /// Dispatch un Request al handler apropiado.

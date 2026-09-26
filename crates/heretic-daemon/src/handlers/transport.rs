@@ -1,4 +1,8 @@
-//! Handlers transport — map a las 133 actions del fLMCP Bridge v0.2.0.
+//! Handlers transport — API fina sobre las 67 actions del FL Heretic Bridge.
+//!
+//! Estas son las unicas actions con semantica propia (validacion de rango,
+//! normalizacion de unidades, releer el estado real en vez de devolver el
+//! eco del bridge). Para todo lo demas esta `call`, que es el escape hatch.
 //!
 //! Mapeo de nuestros tools a actions del bridge:
 //! - `fl_ping`              → `meta.ping`
@@ -43,7 +47,6 @@ impl Transport {
             "set_song_position" => self.set_song_position(params).await,
             "call" => self.call(params).await,
             "actions" => self.actions().await,
-            "call" => self.call(params).await,
             other => Err(HereticError::InvalidRequest(format!(
                 "método transport desconocido: {other}"
             ))),

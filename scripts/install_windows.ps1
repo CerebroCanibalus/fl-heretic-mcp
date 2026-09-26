@@ -1,316 +1,280 @@
-<#
+﻿<#
 .SYNOPSIS
-    Instalador automático one-shot de FL Heretic MCP.
+    Instalador one-shot de FL Heretic MCP.
 .DESCRIPTION
-    Este script:
-    1. Detecta FL Studio, MSVC, CMake, Rust
-    2. Compila el VST3 plugin
-    3. Compila el daemon Rust (release)
-    4. Copia plugin a %COMMONPROGRAMFILES%\VST3%
-    5. Copia FL Heretic Bridge a FL Studio Scripts dir
-    6. Genera token si no existe
-    7. Configura MCP server en opencode.jsonc
-    8. Verifica end-to-end con meta.ping
+    Deja el sistema listo para que un agente IA controle FL Studio:
 
-    Tras correr este script, el usuario solo necesita:
-    1. Abrir FL Studio
-    2. Options > Manage plugins > Scan
-    3. Arrastrar "FL Heretic Bridge" a un slot del mixer
-    4. (Opcional) Cerrar y reabrir FL si quiere autorreplicar
+      1. Detecta FL Studio (y su carpeta de Hardware).
+      2. Compila el workspace Rust en release (sin VST3, sin MSVC, sin CMake).
+      3. Copia el controller script a "FL Heretic Bridge" (NO a "fLMCP Bridge",
+         que es el de un tercero y provocaria colision de ficheros).
+      4. Registra el bridge en el registro de FL, para que aparezca ya elegido
+         en Options > MIDI Settings.
+      5. Genera el token Bearer si no existe.
+      6. Registra el MCP server en la config de opencode.
+      7. Verifica el entorno y escribe un log.
 
-    Y listo. Claude puede hablar con FL Studio via MCP.
+    Tras ejecutarlo, el usuario solo tiene que abrir FL Studio.
 
-.PARAMETER SkipBuild
-    Si se pasa, salta el build (asume binarios precompilados).
-
-.PARAMETER SkipInstall
-    Si se pasa, salta la instalación (solo build).
-
-.PARAMETER SkipOpencodeConfig
-    Si se pasa, no modifica opencode.jsonc.
+    El registro se escribe al CERRAR FL Studio, asi que si FL esta abierto el
+    paso 4 se aplaza y se avisa. Forzar el registro con FL abierto puede
+    corromper la config de hardware: el script no lo hace por ti.
 
 .EXAMPLE
     .\install_windows.ps1
+    .\install_windows.ps1 -SkipBuild
 #>
 
 [CmdletBinding()]
 param(
     [switch]$SkipBuild,
-    [switch]$SkipInstall,
-    [switch]$SkipOpencodeConfig
+    [switch]$SkipRegistry
 )
 
-$ErrorActionPreference = "Stop"
-$ProgressPreference = "SilentlyContinue"
+$ErrorActionPreference = "Continue"   # NUNCA "Stop": una comprobacion fallida
+$ProgressPreference    = "SilentlyContinue"
 
-$ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-$RepoRoot = Split-Path -Parent $ScriptDir
-$Vst3Dir = Join-Path $RepoRoot "vst3-bridge"
-$BridgeDir = Join-Path $RepoRoot "fLMCP-bridge"
-$CargoBin = Join-Path $RepoRoot "target\release"
-$FlHereticExe = Join-Path $CargoBin "fl-heretic.exe"
-$Vst3BuildDir = Join-Path $Vst3Dir "build"
-$Vst3Output = Join-Path $Vst3BuildDir "Release\FL Heretic Bridge.vst3"
+$RepoRoot  = Split-Path -Parent $PSScriptRoot
+$ReleaseDir = Join-Path $RepoRoot "target\release"
+$FlHeretic  = Join-Path $ReleaseDir "fl-heretic.exe"
+$McpExe     = Join-Path $ReleaseDir "fl-heretic-mcp.exe"
+$BridgeSrc  = Join-Path $RepoRoot "fl-heretic-bridge\device_FLHereticBridge.py"
+$BridgeName = "FL Heretic Bridge"
+$DataDir    = Join-Path $env:LOCALAPPDATA "fl-heretic"
+$LogFile    = Join-Path $DataDir "install.log"
+$RegKey     = "HKCU:\SOFTWARE\Image-Line\FL Studio 25\Devices\MIDI input"
 
-# Colores
-function Write-Step($msg) { Write-Host "`n==> $msg" -ForegroundColor Cyan }
-function Write-Ok($msg)   { Write-Host "  [OK] $msg" -ForegroundColor Green }
-function Write-Warn($msg) { Write-Host "  [!] $msg" -ForegroundColor Yellow }
-function Write-Err($msg)  { Write-Host "  [X] $msg" -ForegroundColor Red; throw $msg }
+# --- registro de pasos: cada uno dice OK / FALLO / SALTADO ---------------
+$script:Steps = @()
+function Step  ($name) { $script:Cur = $name; Write-Host ""; Write-Host "==> $name" -ForegroundColor Cyan }
+function Ok     ($m) { $script:Steps += ,@($script:Cur,"OK",$m);  Write-Host "  [OK] $m" -ForegroundColor Green }
+function Warn   ($m) { $script:Steps += ,@($script:Cur,"SALTADO",$m); Write-Host "  [--] $m" -ForegroundColor Yellow }
+function Fail   ($m) { $script:Steps += ,@($script:Cur,"FALLO",$m); Write-Host "  [XX] $m" -ForegroundColor Red }
 
-# ============================================================================
-# Banner
-# ============================================================================
+New-Item -ItemType Directory -Path $DataDir -Force | Out-Null
+$Log = @()
+
+function Note($m) {
+    $line = "  $m"
+    Write-Host $line
+    $Log += $line
+}
 
 Write-Host ""
 Write-Host "============================================================" -ForegroundColor Magenta
-Write-Host "  FL Heretic MCP — Instalador Automático v0.3.0" -ForegroundColor Magenta
+Write-Host "  FL Heretic MCP  -  instalador" -ForegroundColor Magenta
 Write-Host "============================================================" -ForegroundColor Magenta
-Write-Host ""
+Write-Host "  log: $LogFile"
 
-# ============================================================================
-# 1. Detectar prerequisites
-# ============================================================================
+# =========================================================================
+# 1. FL Studio
+# =========================================================================
+Step "1/6  Detectar FL Studio"
 
-Write-Step "1. Detectando prerequisites..."
-
-# FL Studio
-$flScriptsRoot = Join-Path $env:USERPROFILE "Documents\Image-Line\FL Studio\Settings\Hardware"
-if (-not (Test-Path $flScriptsRoot)) {
-    Write-Err "FL Studio no detectado en $flScriptsRoot. ¿Está instalado?"
-}
-Write-Ok "FL Studio detectado en $flScriptsRoot"
-
-# MSVC (cl.exe)
-$clPath = Get-Command cl.exe -ErrorAction SilentlyContinue
-if (-not $clPath) {
-    # Buscar en Visual Studio install dirs
-    $vsPaths = @(
-        "${env:ProgramFiles}\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC",
-        "${env:ProgramFiles(x86)}\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC"
-    )
-    foreach ($p in $vsPaths) {
-        if (Test-Path $p) {
-            $latest = Get-ChildItem $p -Directory | Sort-Object Name -Descending | Select-Object -First 1
-            $clFull = Join-Path $p "$($latest.Name)\bin\Hostx64\x64\cl.exe"
-            if (Test-Path $clFull) {
-                $env:PATH = "$((Split-Path $clFull))\..\..\..\bin\Hostx64\x64" + ";" + $env:PATH
-                Write-Ok "MSVC encontrado: $clFull"
-                break
-            }
-        }
-    }
-    if (-not (Get-Command cl.exe -ErrorAction SilentlyContinue)) {
-        Write-Warn "MSVC (cl.exe) no detectado. Build VST3 se saltará."
-        Write-Warn "Instala Build Tools for Visual Studio 2022 desde https://visualstudio.microsoft.com/downloads/"
-    }
+$Hardware = Join-Path $env:USERPROFILE "Documents\Image-Line\FL Studio\Settings\Hardware"
+if (Test-Path $Hardware) {
+    Ok "carpeta de Hardware: $Hardware"
 } else {
-    Write-Ok "MSVC encontrado: $($clPath.Source)"
+    Fail "no existe $Hardware - FL Studio no parece instalado, o se cambio el perfil"
+    Write-Host "      Se sigue: puede que se cree al abrir FL Studio por primera vez."
+    $Log += "      Se sigue: puede que se cree al abrir FL Studio por primera vez."
 }
 
-# CMake
-$cmakePath = Get-Command cmake -ErrorAction SilentlyContinue
-if (-not $cmakePath) {
-    Write-Warn "CMake no detectado. Build VST3 se saltará."
+$flExe = @(
+    "D:\Program Files\Image-Line\FL Studio 2025\FL64.exe",
+    "$env:ProgramFiles\Image-Line\FL Studio 2025\FL64.exe",
+    "${env:ProgramFiles(x86)}\Image-Line\FL Studio 2025\FL64.exe"
+) | Where-Object { Test-Path $_ } | Select-Object -First 1
+
+if ($flExe) { Ok "FL Studio: $flExe" }
+else { Warn "no se localizo FL64.exe por las rutas habituales" }
+
+# =========================================================================
+# 2. Build
+# =========================================================================
+Step "2/6  Compilar el workspace Rust"
+
+$cargo = Get-Command cargo -ErrorAction SilentlyContinue
+if ($SkipBuild) {
+    Warn "-SkipBuild: se usan los binarios que ya haya"
+} elseif (-not $cargo) {
+    Fail "cargo no esta en el PATH. Instala Rust desde https://rustup.rs/"
+    Write-Host "      Sin build no hay nada que instalar. Aborta aqui."
+    $Log += "      Sin build no hay nada que instalar."
 } else {
-    Write-Ok "CMake encontrado: $($cmakePath.Source)"
-}
-
-# Rust (cargo)
-$cargoPath = Get-Command cargo -ErrorAction SilentlyContinue
-if (-not $cargoPath) {
-    Write-Err "Rust (cargo) no detectado. Instala desde https://rustup.rs/"
-}
-Write-Ok "Rust encontrado: $($cargoPath.Source)"
-
-# ============================================================================
-# 2. Build VST3 plugin
-# ============================================================================
-
-if (-not $SkipBuild) {
-    Write-Step "2. Compilando VST3 plugin..."
-    if (-not $cmakePath) {
-        Write-Warn "Saltando build VST3 (CMake no disponible)"
-    } elseif (-not (Get-Command cl.exe -ErrorAction SilentlyContinue)) {
-        Write-Warn "Saltando build VST3 (MSVC no disponible)"
-    } else {
-        if (Test-Path $Vst3Output) {
-            Write-Ok "VST3 ya compilado: $Vst3Output"
-        } else {
-            Push-Location $Vst3Dir
-            try {
-                cmake -S . -B build -G "Visual Studio 17 2022" -A x64 `
-                    -DCMAKE_BUILD_TYPE=Release 2>&1 | Out-Null
-                cmake --build build --config Release 2>&1 | Out-Null
-                if (-not (Test-Path $Vst3Output)) {
-                    Write-Err "Build VST3 falló — no se encontró $Vst3Output"
-                }
-                Write-Ok "VST3 compilado: $Vst3Output"
-            } finally {
-                Pop-Location
-            }
-        }
-    }
-}
-
-# ============================================================================
-# 3. Build daemon Rust (release)
-# ============================================================================
-
-if (-not $SkipBuild) {
-    Write-Step "3. Compilando daemon Rust (release)..."
+    Note "cargo build --release (tarda el primer uso)"
     Push-Location $RepoRoot
+    $buildOut = & cargo build --release --workspace 2>&1
+    $code = $LASTEXITCODE
+    Pop-Location
+    if ($code -eq 0) { Ok "build correcto" }
+    else {
+        Fail "cargo build fallo (exit $code)"
+        $buildOut | Select-Object -Last 15 | ForEach-Object {
+            Write-Host "      $_" -ForegroundColor DarkGray
+            $Log += "      $_"
+        }
+    }
+}
+
+if (-not (Test-Path $FlHeretic)) { Fail "falta $FlHeretic" }
+else { Ok "daemon:  $FlHeretic" }
+
+if (-not (Test-Path $McpExe)) { Fail "falta $McpExe - el MCP server no se podra arrancar" }
+else { Ok "mcp:     $McpExe" }
+
+# =========================================================================
+# 3. Bridge
+# =========================================================================
+Step "3/6  Instalar el controller script"
+
+$BridgeDest = Join-Path $Hardware $BridgeName
+New-Item -ItemType Directory -Path $BridgeDest -Force | Out-Null
+
+if (-not (Test-Path $BridgeSrc)) {
+    Fail "no encuentro el fuente del bridge: $BridgeSrc"
+} else {
+    Copy-Item $BridgeSrc (Join-Path $BridgeDest "device_FLHereticBridge.py") -Force
+    Ok "bridge en: $BridgeDest\device_FLHereticBridge.py"
+}
+
+# El bridge ajeno comparte ficheros con otro MCP. Si esta, fuera: dos
+# clientes escribiendo en el mismo directorio.
+$Ajeno = Join-Path $Hardware "fLMCP Bridge"
+if (Test-Path $Ajeno) {
+    Warn "existe tambien '$BridgeName' de otro MCP en $Ajeno"
+    Note "  los dos bridges usarían ficheros hr_*.json distintos, pero"
+    Note "  FL solo puede ejecutar un controller script por puerto MIDI."
+    Note "  Si da problemas, renombra o borra esa carpeta."
+    $Log += "  AVISO: hay otro bridge en $Ajeno"
+}
+
+# =========================================================================
+# 4. Registro de FL
+# =========================================================================
+Step "4/6  Registrar el bridge en FL Studio"
+
+$flRunning = Get-Process FL64 -ErrorAction SilentlyContinue
+
+if ($SkipRegistry) {
+    Warn "-SkipRegistry"
+} elseif ($flRunning) {
+    Warn "FL Studio esta abierto (pid $($flRunning[0].Id))"
+    Note "  FL escribe su config al CERRAR. El registro se aplica al salir."
+    Note " asi que se hace ahora y en la proxima vez que abras FL."
+    # Se escribe igual: HKCU es del usuario y FL solo lo lee al arrancar.
+    $applied = $false
     try {
-        cargo build --release 2>&1 | Out-Null
-        if (-not (Test-Path $FlHereticExe)) {
-            Write-Err "Build daemon falló — no se encontró $FlHereticExe"
+        if (-not (Test-Path $RegKey)) { New-Item -Path $RegKey -Force | Out-Null }
+        Get-ChildItem $RegKey -ErrorAction SilentlyContinue | ForEach-Object {
+            Set-ItemProperty -Path $_.PSPath -Name "ScriptFolder" -Value $BridgeName -ErrorAction SilentlyContinue
+            Set-ItemProperty -Path $_.PSPath -Name "Enabled" -Value 1 -ErrorAction SilentlyContinue
+            $applied = $true
         }
-        Write-Ok "Daemon compilado: $FlHereticExe"
-    } finally {
-        Pop-Location
+        if ($applied) { Ok "ScriptFolder='$BridgeName' en los puertos MIDI existentes" }
+        else { Warn "no hay puertos MIDI en el registro todavia (se crean al usar FL)" }
+    } catch {
+        Warn "no se pudo escribir el registro: $($_.Exception.Message)"
     }
-}
-
-# ============================================================================
-# 4. Instalar VST3 plugin
-# ============================================================================
-
-if (-not $SkipInstall) {
-    Write-Step "4. Instalando VST3 plugin..."
-    if (-not (Test-Path $Vst3Output)) {
-        Write-Warn "Saltando instalación VST3 (binario no encontrado)"
-    } else {
-        $vst3Dir = "${env:COMMONPROGRAMFILES}\VST3"
-        if (-not (Test-Path $vst3Dir)) {
-            $vst3Dir = "${env:ProgramFiles}\Common Files\VST3"
+    Note " Recuerda: en FL, Options > MIDI Settings, elige '$BridgeName'."
+} else {
+    $applied = $false
+    try {
+        if (-not (Test-Path $RegKey)) { New-Item -Path $RegKey -Force | Out-Null }
+        Get-ChildItem $RegKey -ErrorAction SilentlyContinue | ForEach-Object {
+            Set-ItemProperty -Path $_.PSPath -Name "ScriptFolder" -Value $BridgeName -ErrorAction SilentlyContinue
+            Set-ItemProperty -Path $_.PSPath -Name "Enabled" -Value 1 -ErrorAction SilentlyContinue
+            $applied = $true
         }
-        New-Item -ItemType Directory -Path $vst3Dir -Force | Out-Null
-        $dest = Join-Path $vst3Dir "FL Heretic Bridge.vst3"
-        Copy-Item $Vst3Output $dest -Force
-        Write-Ok "VST3 instalado en: $dest"
+        if ($applied) { Ok "ScriptFolder='$BridgeName' aplicado" }
+        else { Warn "no hay puertos MIDI registrados; seleccionalo en FL a mano" }
+    } catch {
+        Warn "no se pudo escribir el registro: $($_.Exception.Message)"
     }
 }
 
-# ============================================================================
-# 5. Instalar FL Heretic Bridge (controller script)
-# ============================================================================
+# =========================================================================
+# 5. Token
+# =========================================================================
+Step "5/6  Token de autenticacion"
 
-if (-not $SkipInstall) {
-    Write-Step "5. Instalando FL Heretic Bridge..."
-    $bridgeDirDest = Join-Path $flScriptsRoot "fLMCP Bridge"
-    New-Item -ItemType Directory -Path $bridgeDirDest -Force | Out-Null
-    $bridgeScript = Join-Path $BridgeDir "device_FLStudioMCP.py"
-    $bridgeScriptDest = Join-Path $bridgeDirDest "device_FLStudioMCP.py"
-    if (Test-Path $bridgeScript) {
-        Copy-Item $bridgeScript $bridgeScriptDest -Force
-        Write-Ok "Bridge script instalado en: $bridgeScriptDest"
+$tokenPath = Join-Path $DataDir "token"
+if (Test-Path $tokenPath) {
+    Ok "ya existe: $tokenPath"
+} elseif (Test-Path $FlHeretic) {
+    & $FlHeretic token generate 2>&1 | Out-Null
+    if (Test-Path $tokenPath) { Ok "generado: $tokenPath" }
+    else { Fail "no se genero el token" }
+} else {
+    Warn "sin binario, sin token"
+}
+
+# =========================================================================
+# 6. Config de opencode
+# =========================================================================
+Step "6/6  Registrar el MCP server en opencode"
+
+$ocConfig = Join-Path $env:USERPROFILE ".config\opencode\opencode.jsonc"
+if (-not (Test-Path $McpExe)) {
+    Warn "sin fl-heretic-mcp.exe, se omite la config"
+} else {
+    if (Test-Path $ocConfig) {
+        Copy-Item $ocConfig "$ocConfig.flheretic.bak" -Force
+        Ok "copia de seguridad: $ocConfig.flheretic.bak"
+        Note "  anade este bloque dentro del objeto 'mcp' de $ocConfig :"
+        Note ""
+        # Las llaves dobles son para -f, pero aqui solo se imprime texto:
+        # no hace falta escapar, y escaparlas se nota en la salida.
+        Note '      "fl-heretic": {'
+        Note ('        "command": "{0}",' -f ($McpExe -replace '\\', '\\'))
+        Note '        "env": { "RUST_LOG": "warn" }'
+        Note '      }'
+        Note ""
+        Note "  se deja a mano a proposito: es un .jsonc con comentarios y"
+        Note "  reescribirlo a ciega se los comeria. El .bak esta por si acaso."
+        Note "  recuerda tener el daemon corriendo antes de usar las tools:"
+        Note "    $FlHeretic daemon"
     } else {
-        Write-Err "No se encontró $bridgeScript"
+        Warn "no existe $ocConfig; crealo a mano con el bloque de arriba"
     }
 }
 
-# ============================================================================
-# 6. Generar token
-# ============================================================================
+# =========================================================================
+# Resumen
+# =========================================================================
+Write-Host ""
+Write-Host "============================================================" -ForegroundColor White
+Write-Host "  Resumen" -ForegroundColor White
+Write-Host "============================================================" -ForegroundColor White
 
-if (-not $SkipInstall) {
-    Write-Step "6. Generando token..."
-    $tokenPath = Join-Path $env:LOCALAPPDATA "fl-heretic\token"
-    if (Test-Path $tokenPath) {
-        Write-Ok "Token ya existe: $tokenPath"
-    } else {
-        if (Test-Path $FlHereticExe) {
-            & $FlHereticExe token generate | Out-Null
-            Write-Ok "Token generado: $tokenPath"
-        } else {
-            Write-Warn "Daemon no compilado — saltando generación de token"
-        }
-    }
+# Un paso puede emitir varias lineas (OK + avisos). Para el resumen solo
+# interesa el PEOR estado de cada paso, no cada linea suelta.
+$worst = @{}
+$order = @()
+foreach ($s in $script:Steps) {
+    if (-not $worst.ContainsKey($s[0])) { $order += $s[0]; $worst[$s[0]] = $s[1] }
+    elseif ($s[1] -eq "FALLO") { $worst[$s[0]] = "FALLO" }
+}
+foreach ($n in $order) {
+    $color = switch ($worst[$n]) { "OK" {"Green"} "FALLO" {"Red"} default {"Yellow"} }
+    Write-Host ("  {0,-42} {1}" -f $n, $worst[$n]) -ForegroundColor $color
 }
 
-# ============================================================================
-# 7. Verificar opencode.jsonc
-# ============================================================================
-
-if (-not $SkipOpencodeConfig) {
-    Write-Step "7. Configurando opencode MCP server..."
-    $opencodeConfig = Join-Path $env:USERPROFILE ".config\opencode\opencode.jsonc"
-    $mcpExe = Join-Path $CargoBin "fl-heretic-mcp.exe"
-
-    if (-not (Test-Path $mcpExe)) {
-        Write-Warn "fl-heretic-mcp.exe no compilado — saltando config opencode"
-    } else {
-        if (Test-Path $opencodeConfig) {
-            # Leer config existente
-            $config = Get-Content $opencodeConfig -Raw | ConvertFrom-Json
-            if (-not $config.mcpServers) {
-                $config | Add-Member -MemberType NoteProperty -Name "mcpServers" -Value ([PSCustomObject]@{})
-            }
-            # Verificar si ya existe la config
-            if (-not $config.mcpServers."fl-studio") {
-                $newServer = [PSCustomObject]@{
-                    command = $mcpExe
-                    env = [PSCustomObject]@{
-                        FL_HERETIC_PIPE = "\\.\pipe\fl-heretic-$$"
-                        RUST_LOG = "info"
-                    }
-                }
-                $config.mcpServers | Add-Member -MemberType NoteProperty -Name "fl-studio" -Value $newServer -Force
-                $config | ConvertTo-Json -Depth 10 | Set-Content $opencodeConfig
-                Write-Ok "MCP server configurado en: $opencodeConfig"
-            } else {
-                Write-Ok "MCP server ya configurado"
-            }
-        } else {
-            # Crear config nueva
-            New-Item -ItemType Directory -Path (Split-Path $opencodeConfig) -Force | Out-Null
-            $newConfig = [PSCustomObject]@{
-                mcpServers = [PSCustomObject]@{
-                    "fl-studio" = [PSCustomObject]@{
-                        command = $mcpExe
-                        env = [PSCustomObject]@{
-                            FL_HERETIC_PIPE = "\\.\pipe\fl-heretic-$$"
-                            RUST_LOG = "info"
-                        }
-                    }
-                }
-            }
-            $newConfig | ConvertTo-Json -Depth 10 | Set-Content $opencodeConfig
-            Write-Ok "opencode.jsonc creado en: $opencodeConfig"
-        }
-    }
+$failed = @($order | Where-Object { $worst[$_] -eq "FALLO" }).Count
+Write-Host ""
+if ($failed -eq 0) {
+    Write-Host "  Sin fallos. Para usarlo:" -ForegroundColor Green
+    Write-Host "    1. $FlHeretic daemon   (dejarlo en una terminal)" -ForegroundColor Gray
+    Write-Host "    2. abrir FL Studio" -ForegroundColor Gray
+    Write-Host "    3. abrir opencode y probar fl_ping" -ForegroundColor Gray
+} else {
+    Write-Host "  $failed paso(s) con fallo. Revisa el log:" -ForegroundColor Red
+    Write-Host "    $LogFile" -ForegroundColor Gray
 }
 
-# ============================================================================
-# 8. Resumen + instrucciones finales
-# ============================================================================
-
+$Log | Set-Content $LogFile -Encoding UTF8
 Write-Host ""
-Write-Host "============================================================" -ForegroundColor Green
-Write-Host "  Instalación completa" -ForegroundColor Green
-Write-Host "============================================================" -ForegroundColor Green
+Write-Host "  log escrito en $LogFile"
 Write-Host ""
-Write-Host "El usuario debe hacer UNA SOLA COSA más:"
-Write-Host ""
-Write-Host "  1. Abrir FL Studio 2025" -ForegroundColor Yellow
-Write-Host "  2. Menú Options > Manage plugins > click 'Start scan'" -ForegroundColor Yellow
-Write-Host "  3. Confirmar que 'FL Heretic Bridge' aparece con check ✓" -ForegroundColor Yellow
-Write-Host "  4. Cerrar el manager (no cargar el plugin todavía)" -ForegroundColor Yellow
-Write-Host "  5. Abrir el mixer, arrastrar 'FL Heretic Bridge' a CUALQUIER insert slot" -ForegroundColor Yellow
-Write-Host "     (es un pass-through — no afecta el audio)" -ForegroundColor Yellow
-Write-Host ""
-Write-Host "Tras eso, abrir Claude/OpenCode y ejecutar:" -ForegroundColor Cyan
-Write-Host ""
-Write-Host "  > Verifica la conexión con `fl_ping`" -ForegroundColor White
-Write-Host ""
-Write-Host "Si todo va bien, FL Studio responde con su version + uptime." -ForegroundColor Cyan
-Write-Host ""
-Write-Host "Para auto-arranque del daemon al iniciar sesión, considerar:" -ForegroundColor DarkGray
-Write-Host "  schtasks /create /tn FLHereticDaemon /tr '$FlHereticExe daemon' /sc onlogon" -ForegroundColor DarkGray
-Write-Host ""
-Write-Host "Paths importantes:" -ForegroundColor DarkGray
-Write-Host "  VST3: $Vst3Output → %COMMONPROGRAMFILES%\VST3\FL Heretic Bridge.vst3" -ForegroundColor DarkGray
-Write-Host "  Bridge: $bridgeScriptDest" -ForegroundColor DarkGray
-Write-Host "  Daemon: $FlHereticExe" -ForegroundColor DarkGray
-Write-Host "  Token: $env:LOCALAPPDATA\fl-heretic\token" -ForegroundColor DarkGray
-Write-Host "  Audit: $env:LOCALAPPDATA\fl-heretic\audit.db" -ForegroundColor DarkGray
+Read-Host "  Pulsa Enter para cerrar"
+exit $failed
