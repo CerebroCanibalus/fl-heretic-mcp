@@ -60,6 +60,36 @@ fn toda_accion_de_las_tools_existe_en_el_catalogo() {
 }
 
 #[test]
+fn daw_health_no_llama_a_una_accion_que_no_existe() {
+    // Encontrado al usar la tool de verdad: `daw_health` devolvia
+    // "Unknown command: transport". No existe una action `transport`; la
+    // real es `transport_get_state`.
+    //
+    // Aqui se comprueba lo que se puede comprobar sin DAW: que el nombre de
+    // accion que aparece en el codigo este en el catalogo generado.
+    let src = include_str!("tools.rs");
+    for linea in src.lines() {
+        let t = linea.trim();
+        // Solo las llamadas de la forma call("algo", ...)
+        let Some(rest) = t.strip_prefix("call(\"") else {
+            continue;
+        };
+        let Some(fin) = rest.find('"') else { continue };
+        let accion = &rest[..fin];
+        // Los nombres que las tools componen (track.<op>, fx.<op>...) se
+        // expands en runtime: no se pueden comprobar aqui.
+        if accion.contains('.') || accion.contains("+") {
+            continue;
+        }
+        assert!(
+            heretic_daw::actions::doc_of(accion).is_some(),
+            "daw_health llama a '{accion}', que no esta en el catalogo. \
+             Los nombres reales se generan con: python tools/gen_actions.py"
+        );
+    }
+}
+
+#[test]
 fn la_accion_mas_raros_no_se_olvido() {
     // `project_get_paths` no existia y se coló en la version anterior de
     // daw_project. Este test falla si alguien lo vuelve a escribir.

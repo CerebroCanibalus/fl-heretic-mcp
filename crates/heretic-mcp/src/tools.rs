@@ -110,7 +110,10 @@ pub async fn daw_health() -> std::result::Result<Value, ToolError> {
 
     // El ping puede pasar y la escritura fallar si el bridge va con retraso.
     // Comprobar de mas es barato y evita el falso "todo bien".
-    match call("transport", json!({})) {
+    // `transport_get_state`, NO `transport`: el bridge no tiene una action
+    // llamada `transport`, y da "Unknown command". Los nombres reales estan
+    // en heretic_daw::ACTIONS, generados del bridge.
+    match call("transport_get_state", json!({})) {
         Ok(v) => out["transport"] = json!({ "ok": true, "estado": v }),
         Err(e) => out["transport"] = json!(e.to_string()),
     }
