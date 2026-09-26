@@ -15,12 +15,21 @@
 //! [FL Studio]
 //! ```
 //!
-//! Cada `#[tool]` aquí es un thin proxy: valida args, abre conexión al daemon,
-//! hace handshake HMAC, envía request, devuelve response.
+//! No hay daemon intermedio: este proceso ES el dueño del transporte. Eso
+//! importa por dos razones concreteas:
 //!
-//! Para Fase 2 hay 7 tools (transport). Fase 3 añadirá el resto (67 tools del FLStudioMCP).
+//! 1. **Serializacion.** El bridge usa un unico `command.json`. Si dos tools
+//!    se ejecutan a la vez (que es lo normal en un agente), las dos escriben
+//!    ahi y colisionan. Un `Mutex` aqui lo resuelve; un proceso aparte
+//!    tambien, pero seria un proceso mas para lo mismo.
+//! 2. **Liveness.** Sin daemon no hay a quien preguntar si el bridge vive.
+//!    Por eso `daw_health` comprueba el bridge de verdad antes de prometer nada.
+//!
+//! La capa de auth HMAC / audit / rate limit que vivia en el daemon se ha
+//! eliminado a proposito: el agente ES el proceso del cliente MCP, ya puede
+//! escribir en %TEMP% el mismo, asi que un HMAC entre dos procesos del mismo
+//! usuario no protege nada. Era seguridad de teatro.
 
 #![forbid(unsafe_code)]
 
-pub mod client;
 pub mod tools;

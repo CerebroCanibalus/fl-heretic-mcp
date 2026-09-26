@@ -1,33 +1,46 @@
 ﻿# DAW Heretic MCP
 
-Daemon blindado + MCP server para controlar un DAW desde un agente IA.
+MCP server en Rust para que un agente IA controle una DAW entera: crear
+proyectos, pistas, meter plugins, escribir MIDI, mezclar y renderizar.
 
-**Estado: scaffolding.** Solo REAPER, y sin bridge configurado todavia.
-Ver `AGENTS.md` para el estado real, el analisis de por que se abandono
-FL Studio, y los siguientes pasos.
+**Estado: andamiaje compilando.** Reaper 7.80 está instalado, pero el ReaScript
+bridge todavía no se ha probado contra el DAW real. Ver `AGENTS.md` para el
+estado exacto y los siguientes pasos.
 
-## Por que no FL Studio
+## Por qué no FL Studio
 
-FL Studio 2025 no expone API de proyecto: no hay forma de abrir, crear ni
-cerrar proyectos desde su API, y su menu File es owner-draw. Su Python va en
-un sandbox sin file I/O ni red. La misma limitacion que tiene Cubase.
+FL Studio 2025 no expone API de proyecto: de las 79 constantes `midi.FPT_*`
+solo hay `FPT_Save` y `FPT_SaveNew`, no hay forma de abrir, crear ni cerrar
+proyectos, y su menú File es owner-draw. Su Python corre en un sandbox sin
+file I/O ni red. Es la misma limitación que tiene Cubase.
 
-La investigacion completa, con las medidas, esta en el commit `0930996` del
-historial.
+La investigación completa, con medidas, está en `docs_fl_audit.md` y en el
+historial (`git show 0930996`).
 
-## Por que REAPER
+## Por qué Reaper
 
-900+ funciones de API, control externo real (TCP o file-RPC), ReaScript con
-file I/O y red libres, y varios MCPs existentes que se pueden tomar como
-base. Los plugins nativos de FL Studio siguen accesibles cargando
-`FL Studio VSTi` como VST2 dentro de Reaper.
+900+ funciones de API, control externo real, ReaScript con file I/O y red
+libres, y varios MCPs existentes como base. $60 la licencia tras 60 días de
+evaluación completa.
+
+Los plugins nativos de FL Studio siguen accesibles: `FL Studio VSTi` carga FL
+entero como VST2 dentro de Reaper, así que FLEX y el resto del bundle
+continúan funcionando.
 
 ## Arquitectura
 
-    MCP (FlojoMCP, Rust)  ->  daemon blindado  ->  file-RPC  ->  Reaper
+    opencode ──stdio MCP──> daw-heretic-mcp (FlojoMCP, Rust)
+                              │ file-RPC
+                              ▼
+                         [Reaper] ←── ReaScript Lua
 
-La capa de blindaje (auth HMAC, audit log SQLite, rate limit) vive en
-`heretic-core` y es lo que ningun MCP de Reaper tiene.
+Sin daemon intermedio: el servidor MCP es el dueño del transporte.
+
+## Tools
+
+7, no 181. El MCP de referencia gasta ~22.400 tokens en schemas en cada
+request; esta surface, ~1.800. `daw_do` sigue llegando a las 181 acciones del
+DAW para lo que haga falta.
 
 ## Licencia
 

@@ -71,7 +71,7 @@ impl std::fmt::Display for Token {
 
 /// Almacén persistente del token en disco.
 ///
-/// Path por defecto: `%LOCALAPPDATA%\fl-heretic\token` (Windows).
+/// Path por defecto: `%LOCALAPPDATA%\daw-heretic\token` (Windows).
 /// Permisos: solo el usuario actual puede leer/escribir (0600 en Unix).
 pub struct TokenStore {
     path: PathBuf,
@@ -86,11 +86,11 @@ impl TokenStore {
     pub fn default_path() -> PathBuf {
         if cfg!(windows) {
             std::env::var("LOCALAPPDATA")
-                .map(|p| PathBuf::from(p).join("fl-heretic").join("token"))
-                .unwrap_or_else(|_| PathBuf::from("fl-heretic-token"))
+                .map(|p| PathBuf::from(p).join("daw-heretic").join("token"))
+                .unwrap_or_else(|_| PathBuf::from("daw-heretic-token"))
         } else {
             let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-            PathBuf::from(home).join(".fl-heretic").join("token")
+            PathBuf::from(home).join(".daw-heretic").join("token")
         }
     }
 

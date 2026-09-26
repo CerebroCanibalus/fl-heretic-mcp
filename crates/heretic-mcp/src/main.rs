@@ -14,7 +14,7 @@ use tracing_subscriber::EnvFilter;
 use heretic_mcp::tools as _tools;
 
 /// Struct vacío que FlojoMCP descubre automáticamente las tools con `#[tool]`.
-#[flojo_mcp(name = "fl-heretic-mcp", version = "0.1.0")]
+#[flojo_mcp(name = "daw-heretic-mcp", version = "0.1.0")]
 struct FlHereticMcpServer;
 
 #[tokio::main]
@@ -28,9 +28,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .try_init();
 
     tracing::info!(
-        "fl-heretic-mcp {} arrancando (daemon: {})",
+        "daw-heretic-mcp {} arrancando",
         env!("CARGO_PKG_VERSION"),
-        std::env::var("FL_HERETIC_PIPE").unwrap_or_else(|_| "<no FL_HERETIC_PIPE set>".into()),
     );
 
     flojo_run_stdio(FlHereticMcpServer::new()).await?;

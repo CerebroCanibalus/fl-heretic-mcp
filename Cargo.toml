@@ -13,11 +13,11 @@ edition = "2024"
 authors = ["General Beria"]
 license = "GPL-3.0-or-later"
 rust-version = "1.85"
-description = "Daemon blindado + MCP server para FL Studio sobre FlojoMCP"
-repository = "https://github.com/CerebroCanibalus/fl-heretic-mcp"
+description = "MCP server para controlar una DAW desde un agente IA"
+repository = "https://github.com/CerebroCanibalus/daw-heretic-mcp"
 
 # ---------------------------------------------------------------------------
-# Path deps — FLHereticMCP vive junto a FlojoMCP
+# Path deps: este repo vive junto a FlojoMCP
 # ---------------------------------------------------------------------------
 # (las deps path van en [workspace.dependencies] abajo)
 

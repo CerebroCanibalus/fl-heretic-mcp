@@ -7,8 +7,8 @@
 //!
 //! ## Path por defecto
 //!
-//! - Windows: `%LOCALAPPDATA%\fl-heretic\audit.db`
-//! - Unix: `$HOME/.fl-heretic/audit.db`
+//! - Windows: `%LOCALAPPDATA%\daw-heretic\audit.db`
+//! - Unix: `$HOME/.daw-heretic/audit.db`
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -157,11 +157,11 @@ impl AuditLog {
     pub fn default_path() -> PathBuf {
         if cfg!(windows) {
             std::env::var("LOCALAPPDATA")
-                .map(|p| PathBuf::from(p).join("fl-heretic").join("audit.db"))
-                .unwrap_or_else(|_| PathBuf::from("fl-heretic-audit.db"))
+                .map(|p| PathBuf::from(p).join("daw-heretic").join("audit.db"))
+                .unwrap_or_else(|_| PathBuf::from("daw-heretic-audit.db"))
         } else {
             let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-            PathBuf::from(home).join(".fl-heretic").join("audit.db")
+            PathBuf::from(home).join(".daw-heretic").join("audit.db")
         }
     }
 

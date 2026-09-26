@@ -755,7 +755,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "flojo-mcp",
- "heretic-core",
+ "heretic-daw",
  "serde",
  "serde_json",
  "tempfile",

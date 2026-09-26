@@ -1,4 +1,4 @@
-//! Tipos de error para FL Heretic MCP.
+//! Tipos de error de DAW Heretic MCP.
 //!
 //! `HereticError` es el error canónico que cruza todas las capas del daemon.
 //! Cada variante lleva contexto suficiente para que el cliente sepa qué hacer.
@@ -6,7 +6,7 @@
 use std::path::PathBuf;
 use thiserror::Error;
 
-/// Resultado con error tipado de FL Heretic.
+/// Resultado con error tipado.
 pub type Result<T> = std::result::Result<T, HereticError>;
 
 /// Errores del daemon blindado.
