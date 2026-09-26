@@ -180,6 +180,29 @@ cuando el daemon leía `position`). Con `daw_fx("add", track=0, fx="ReaEQ")`
 el schema dice el nombre exacto. `daw_do` deja la larga cola abierta, pero el
 error ya no es silencioso.
 
+## 5b. Instalar el release (y por que casi no se puede desde dentro)
+
+```powershell
+# con opencode CERRADO
+.\tools\install_release.ps1
+# con la sesion abierta, para comprobar que compila sin tocar el binario vivo
+.\tools\install_release.ps1 -Verify
+```
+
+opencode ejecuta `target\release\daw-heretic-mcp.exe` y lo mantiene abierto, y
+Windows no deja reemplazar un fichero abierto. Por eso `cargo build --release`
+falla con `failed to remove ... daw-heretic-mcp.exe` y parece un problema de
+compilacion cuando lo que esta bloqueado es el propio servidor.
+
+Durante esa temporada se compila a `target/verify` y se verifica por
+`tools/mcp_call.py`, que habla MCP de verdad por stdio. **Sin `mcp_call.py` no
+se puede probar nada de este repo**: un test unitario pasa y el tool puede
+estar roto.
+
+El aviso de "abierto" del script usa `[System.IO.File]::Open(..., FileShare::None)`,
+medido: **`Copy-Item` si funciona con un fichero abierto**, asi que copiar no
+dice nada. Solo el open exclusivo falla.
+
 ## 6b. Trampas de Reaper (medidas, no supuestas)
 
 Cada una costó tiempo o dejó el DAW inservible. Todas están en el código con su

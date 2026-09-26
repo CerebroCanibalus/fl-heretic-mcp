@@ -216,7 +216,7 @@ pub fn rescan(
     Ok(RescanReport {
         ok: true,
         detalle: format!(
-            "cache con {lineas} plugins; re-scan ejecutado. \
+            "cache con {lineas} plugins y {hits} aciertos; re-scan ejecutado. \
              Si el plugin no aparece, reinicia Reaper: hay builds suyas en las que \
              el re-scan se aplaza al siguiente arranque."
         ),

@@ -43,6 +43,12 @@ use std::path::Path;
 const TASA: u32 = 44100;
 
 /// Amplitud lineal -> dBFS. `0.0` es silencio.
+///
+/// Solo la usan los tests, y a proposito: el valor "declarado" de una señal
+/// (`dbfs`) se contrasta contra el pico que sale de verdad de generar las
+/// muestras. Si la generacion y la etiqueta se separaran, ese test lo diria.
+/// Por eso es `cfg(test)` y no codigo muerto que se limpia sin querer.
+#[cfg(test)]
 fn lineal_a_db(a: f32) -> f32 {
     if a <= 0.0 {
         f32::NEG_INFINITY
