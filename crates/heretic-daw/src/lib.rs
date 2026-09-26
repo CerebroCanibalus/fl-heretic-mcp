@@ -31,8 +31,13 @@
 
 #![deny(unsafe_code)]
 
+#[cfg(test)]
+mod live_tests;
+
+pub mod actions;
 pub mod file_rpc;
 pub mod reaper;
 
+pub use actions::{ACTION_GROUPS, ACTIONS};
 pub use file_rpc::{FileRpc, RpcError};
-pub use reaper::{ReaperBridge, ReaperConfig, ACTIONS};
+pub use reaper::{ReaperBridge, ReaperConfig};
