@@ -289,6 +289,82 @@ tiene "mucha menos sonoridad que su pico". Al revés: recortar **aplasta las
 crestas y acerca el RMS al pico** (factor de cresta 1.07 dB frente a 3.01 de un
 sano). De ahí salió la detección de recorte.
 
+## 6c. Plugins: lo que Reaper no te cuenta (medido con epi, 2026-09-26)
+
+No había **ningún piano** instalado. 251 plugins, 4 instrumentos (Dexed,
+ReaSamplOmatic5000, ReaSynDr, ReaSynth) y ninguno es un piano. Se instaló
+**epi v0.9.0** (DatanoiseTV, GPL-3.0, 7,4 MB, VST3), que trae 5 motores de piano
+físico (Tine, E-Grand, Reed, Grand, Clav) y 2133 parámetros.
+
+### Reaper solo reescanea VST3 al arrancar
+
+`daw_setup op=rescan` lanza `Main_OnCommand(50124)`, que es *refresh all
+plug-ins*: refresca la lista ya cargada, **no busca ficheros nuevos en disco**.
+Medido: con epi instalado en la carpeta VST3 y 50124 ejecutado, `encontrado:
+false`. Hizo falta reiniciar Reaper.
+
+La carpeta `%LOCALAPPDATA%\Programs\Common\VST3` es un default de Reaper, no
+está en su config: `reaper.ini` solo tiene 3 rutas **VST2** y ninguna VST3. Una
+de ellas es `D:\Program Files\Image-Line\FL Studio 2025\System\Plugin\VSTi\x64`
+y está **vacía**, lo que cierra el pendiente de §3: no hay VSTi de FL que
+importar.
+
+### El protocolo exige cadenas JSON anidadas
+
+`midi_insert_notes_batch` hace `json_decode(p.notes)`: `notes` tiene que ser una
+**cadena** con el JSON dentro, no un array. Pasando un array da
+`Invalid notes JSON`, que no dice que el problema es ese.
+
+Los parámetros desconocidos se **ignoran en silencio**: `item_create_midi`
+documenta `position` y acepta `start_position` sin rechistar. Y el `required` del
+catálogo está incompleto: casi todas las acciones `midi_*` necesitan `item_index`
+y no lo declaran.
+
+### `fx_scan_params` está roto de origen
+
+Llama a `reaper.TrackFX_GetParameterStepCount`, que **no existe** en el catálogo
+oficial de 7.80. La real es `TrackFX_GetParameterStepSizes` y devuelve otra
+cosa. El bridge llama a 165 funciones `reaper.*` y esta es la **única**
+inventada. Falla con `attempt to call a nil value`, que el guardián convierte en
+texto. Para los parámetros con nombre sirve `fx_get_params`, que sí funciona y
+devuelve 53 de 2133 con nombre, valor y display.
+
+### El piano instalado no suena: y nada lo avisa
+
+Este es el dolor de verdad, y es de los que no se ven:
+
+| comprobación | resultado |
+|---|---|
+| `fx_list_installed` | 252 plugins, `VST3i: Epi (DatanoiseTV)` |
+| `fx_get_chain` | `fx_count: 1`, `param_count: 2133` |
+| 3 notas insertadas y releídas | `inserted_count: 3` |
+| `project_export_audio` | `rendered: true` |
+| **pico del WAV** | **−48,17 dBFS** |
+
+Todo verde y el resultado es inaudible. Lo que hay dentro:
+
+- Un componente de amplitud **fija 2⁻⁸** (~−48 dBFS) con **periodo de 3
+  muestras** (~14,7 kHz a 44,1 kHz), presente durante toda la nota.
+- No cambia con el instrumento (Tine y Grand dan lo mismo), ni con la frecuencia
+  (44,1 y 48 kHz idénticos), ni con abrir el editor del plugin.
+- **No escala con el volumen de la pista**: 0 dB da −48,183 y +40 dB da −48,166
+  (0,017 dB de diferencia). La señal musical **sí** escala (el RMS por segundo
+  pasa de −57,19 a −55,96, y la cola de −96,30 a −54,19 dBFS): lo que no escala
+  es ese componente fijo.
+- Factor de cresta 7-9 dB, así que el fichero **no** está recortado. Solo está
+  48 dB por debajo y dominado por el artefacto.
+- Con el plugin **bypasseado** el render es silencio digital (−999 dBFS), así que
+  el artefacto es de epi, no del bridge.
+
+El render de Reaper sale a **24 bits**, y el módulo `wave` de Python solo acepta
+1, 2 y 4 bytes por muestra: leerlo como int32 alineado da números inventados (me
+salió un "pico de −6 dBFS" en un fichero de 3 bytes). Hay que convertir a
+`int32 >> 8`.
+
+Conclusión: **cargado no es lo mismo que funcionando**. Un agente que solo mire
+`fx_add` y `rendered: true` dará por bueno un plugin que no suena. La única red
+es renderizar y medir el fichero, y eso son 8 llamadas y 3 scripts.
+
 ## 7. `reference/`: los MCPs que estudiar
 
 Clonados, en `.gitignore` (material de referencia, no código nuestro):
